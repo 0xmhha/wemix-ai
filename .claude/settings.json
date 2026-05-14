@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "description": "go-wemix project Claude Code settings. Protects auto-generated/embedded files and surfaces Wemix-specific build/lint workflows.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "tool == \"Edit\" || tool == \"Write\"",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "#!/bin/bash\ninput=$(cat)\npath=$(echo \"$input\" | jq -r '.tool_input.file_path // empty' 2>/dev/null)\nif [[ -z \"$path\" ]]; then echo \"$input\"; exit 0; fi\nif [[ \"$path\" == *\"wemix/bind/gen_\"*\"_abi.go\" ]]; then echo '[wemix] WARNING: wemix/bind/gen_*_abi.go is abigen-generated. Edit Solidity in wemix/governance-contract/contracts/ and regenerate via go generate.' >&2; fi\nif [[ \"$path\" == *\"core/wemix_genesis.go\" ]]; then echo '[wemix] WARNING: core/wemix_genesis.go contains embedded mainnet/testnet genesis JSON. Modifying alters live network state — confirm intent.' >&2; fi\nif [[ \"$path\" == *\"/gen_\"*\".go\" || \"$path\" == *\"messages\"*\".pb.go\" ]]; then echo '[wemix] WARNING: looks auto-generated (gencodec / protobuf / rlpgen). Regenerate via the source tool instead of editing.' >&2; fi\nif [[ \"$path\" == *\"wemix/etcdutil.go.new\" ]]; then echo '[wemix] WARNING: etcdutil.go.new is NOT part of the build — runtime code lives in etcdutil.go.' >&2; fi\necho \"$input\""
+          }
+        ]
+      },
+      {
+        "matcher": "tool == \"Bash\" && tool_input.command matches \"git commit\"",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "#!/bin/bash\ninput=$(cat)\necho '[wemix] Pre-commit reminder: run `make lint && make test-short && make gwemix` if you have not already.' >&2\necho \"$input\""
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(make gwemix)",
+      "Bash(make lint)",
+      "Bash(make test-short)",
+      "Bash(make test)",
+      "Bash(go build ./...)",
+      "Bash(go vet ./...)",
+      "Bash(go test -short -count=1 ./...)",
+      "Bash(go test -short -count=1 ./wemix/...)",
+      "Bash(go test -short -count=1 ./core/...)",
+      "Bash(go test -short -count=1 ./params/...)",
+      "Bash(go list -deps ./cmd/gwemix/...)",
+      "Bash(golangci-lint run *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr diff *)",
+      "Bash(gh pr checkout *)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)"
+    ]
+  }
+}
