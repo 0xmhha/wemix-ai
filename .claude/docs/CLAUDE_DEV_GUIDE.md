@@ -24,10 +24,13 @@
 13. [etcd 클러스터 운영](#13-etcd-클러스터-운영)
 14. [거버넌스 컨트랙트 흐름](#14-거버넌스-컨트랙트-흐름)
 
+### 보안 불변식 (회귀 방지)
+15. [StatusEx 신뢰 경계 & wemixWorkKey 보호](#15-statusex-신뢰-경계--wemixworkkey-보호)
+
 ### 운영
-15. [CI/CD](#15-cicd)
-16. [제네시스 생성](#16-제네시스-생성)
-17. [주요 설정값 참조](#17-주요-설정값-참조)
+16. [CI/CD](#16-cicd)
+17. [제네시스 생성](#17-제네시스-생성)
+18. [주요 설정값 참조](#18-주요-설정값-참조)
 
 ---
 
@@ -35,9 +38,10 @@
 
 | 항목 | 값 |
 |------|-----|
-| 바이너리 이름 | `gwemix` |
+| 바이너리 이름 | `gwemix` (+ 배포 tarball 동봉 `logrot`) |
+| 현재 버전 | **v0.10.14-stable** (`params/version.go`) |
 | Go 모듈 경로 | `github.com/ethereum/go-ethereum` *(geth fork — 모듈명 그대로 유지)* |
-| Go 버전 | 1.19 (go.mod) |
+| Go 버전 | 1.19 (go.mod 선언) |
 | Chain ID | Mainnet: **1111**, Testnet: **1112** *(`params/config.go`의 `WemixMainnetChainConfig.ChainID` 확인)* |
 | 합의 알고리즘 | Clique 변형 + etcd 기반 마이닝 토큰 락 + Governance Contract |
 | 블록 주기 | 1초 *(EnvStorage `getBlockCreationTime()`으로 동적 조정 가능)* |
@@ -156,9 +160,9 @@ eth/                 ← 이더리움 백엔드
 eth/protocols/eth/   ← wemix_handlers.go (Wemix 메시지 핸들러)
 wemix/               ← Wemix 어드민·합의 코디네이션
   admin.go           ← wemixAdmin: 거버넌스 조회, 보상 분배, 멤버십
-  etcdutil.go        ← etcd 임베디드 운영 + 마이닝 토큰
-  miner_limit.go     ← 마이너 상태 수집
-  sync.go            ← 멤버십 동기화 (loadMiningToken, findConsensusBlock)
+  etcdutil.go        ← etcd 임베디드 운영 + 마이닝 토큰 (acquireToken, etcdResetWork)
+  miner_limit.go     ← 마이너 상태 수집 (electNextMiner)
+  sync.go            ← 멤버십 동기화 (loadMiningToken, findConsensusBlock, syncCheck)
   spinlock.go        ← etcd 락 보호용 스핀락
   api/               ← WemixMinerStatus 이벤트 API
   bind/              ← abigen 산출 Go 바인딩 (gen_*_abi.go)
@@ -234,11 +238,29 @@ make test-short   # 빠른 단위 테스트
 
 ### 주요 테스트 위치
 
-- `core/blockchain_test.go`, `core/state_processor_test.go`
-- `cmd/gwemix/*_test.go` (configuration / governance deploy 검증)
-- `wemix/rewards_test.go` — Brioche 하드포크 보상 분배 검증
+Wemix 고유 코드 (수정 시 필수 실행):
+
+| 파일 | 커버 대상 |
+|------|-----------|
+| `wemix/rewards_test.go` | `distributeRewards` 4-way 분배, 보상 검증, Brioche halving (`TestDistributeRewards`, `TestRewardValidation`, `TestBriocheHardFork`) |
+| `wemix/etcd_test.go` | 임베디드 etcd 위 `etcdResetWork` CAS 동작 (`TestEtcdResetWork_*` 5종) |
+| `wemix/sync_regression_test.go` | StatusEx 위조 / `wemixWorkKey` 오염 공격 체인의 pre-fix 재현 ↔ post-fix 방어 쌍 (§15) |
+| `wemix/api/api_test.go` | `WemixMinerStatus.Clone()` nil-safe 복사 |
+| `core/types/transaction_test.go` | Fee Delegation — `TestRecoverFeePayer`, `TestAsMessageFeeDelegation`, `TestSetSenderTxAccessListPreserved` |
+| `cmd/gwemix/*_test.go` | CLI / 제네시스 / `governancedeploy` 검증 (8개) |
+| `params/config_test.go` | 하드포크 순서·호환성 |
+
+빌드 의존성 밖 (별도 실행):
+
 - `wemix/bind/backends/wemix_simulated_test.go` — 거버넌스 시뮬레이션 백엔드
-- `wemix/governance-contract/test/` — Solidity 컨트랙트 hardhat/foundry 테스트
+- `wemix/governance-contract/test/gov_test.go` — GovImp 거버넌스 시나리오. `TestGov`, `TestGov_IndexCorruptionAfterRemoveMember`, `TestW1G01`~`TestW1G04` 계열(CertiK W1G 대응), `TestW1G_LegacyUpgrade_FullLifecycle`
+- `wemix/governance-contract/test/gov_bind_test.go` — abigen 바인딩 정합성
+
+> **red→green 픽스처**: `wemix/governance-contract/contracts/mock/GovImpLegacy.sol`, `GovImpPreMarker.sol`은 **취약했던 시점의 구현을 그대로 보존한 테스트 픽스처**다. 최신 GovImp에 맞춰 "고치면" 회귀 테스트가 무의미해지므로 수정 금지.
+
+geth 원본 테스트 중 자주 걸리는 것: `core/blockchain_test.go`, `core/state_processor_test.go`, `core/tx_pool_test.go`, `eth/protocols/eth/handler_test.go`.
+
+전체 목록: `.claude/docs/BUILD_SOURCE_FILES.md` §3 (85개 패키지 / 302개 테스트 파일).
 
 ### CI 분기
 
@@ -433,6 +455,43 @@ type FeeDelegateDynamicFeeTx struct {
 2단계: FeePayer가 [SenderTx 전체 + FeePayer 주소]에 대해 서명 → FV/FR/FS에 저장
 ```
 
+### FeePayer 검증 단일 진입점 — `RecoverFeePayer`
+
+FeePayer 검증 로직은 여러 곳에 흩어져 있었으나 현재는 **`core/types/transaction_signing.go`의 `RecoverFeePayer` 하나로 통합**되어 있다.
+
+```go
+// core/types/transaction_signing.go
+var (
+    ErrFeePayerNotSet  = errors.New("fee delegation: feePayer not set")   // FeePayer 필드가 nil
+    ErrInvalidFeePayer = errors.New("fee delegation: invalid feePayer")   // FV/FR/FS 복구 결과 불일치
+)
+
+// FV/FR/FS에서 주소를 복구하고, 선언된 FeePayer 주소와 일치하는지 검증한다.
+func RecoverFeePayer(chainID *big.Int, tx *Transaction) (common.Address, error)
+```
+
+호출 지점:
+
+| 위치 | 역할 |
+|------|------|
+| `core/types/transaction.go: AsMessage()` | `tx.Type() == FeeDelegateDynamicFeeTxType`일 때 **항상** 검증 후 `msg.feePayer` 설정. 실패 시 에러 반환 |
+| `core/tx_pool.go: validateTx()` | txpool 진입 검증 + FeePayer 잔액 확인 |
+| `light/txpool.go: validateTx()` | 라이트 클라이언트 동일 검증 |
+
+> **중요 — 검증 위치 변경**: 예전에는 `internal/ethapi/api.go: SubmitTransaction()`이 RPC 경계에서 FeePayer nil/서명을 따로 검사했다. 이 중복 검사는 제거되었고, 검증은 txpool과 `AsMessage`로 일원화되었다. **RPC 레이어에 FeePayer 검증을 되살리지 말 것** — 중복 검증이고, P2P로 들어온 tx는 어차피 RPC를 거치지 않으므로 실효도 없다.
+>
+> `AsMessage`의 검사는 `tx.FeePayer() != nil` 여부가 아니라 **트랜잭션 타입**으로 분기한다. 타입이 fee-delegated인데 FeePayer가 없으면 조용히 넘어가지 않고 `ErrFeePayerNotSet`으로 실패해야 한다.
+
+### `SetSenderTx`의 AccessList 사전 할당
+
+```go
+// core/types/feedelegate_dynamic_fee_tx.go
+tx.SenderTx.AccessList = make(AccessList, len(senderTx.AccessList))  // ← 필수
+copy(tx.SenderTx.AccessList, senderTx.AccessList)
+```
+
+`copy`는 목적지 슬라이스 길이만큼만 복사한다. 제로값 초기화된 `SenderTx`의 `AccessList`는 nil(len 0)이므로 `make` 없이 `copy`하면 **엔트리가 전부 유실되고 sender 서명 복구가 실패**한다. RPC 조립 경로에서 재현되며, 회귀 테스트는 `TestSetSenderTxAccessListPreserved`.
+
 ### 수정 시 주의사항
 
 | 영역 | 주의 |
@@ -448,13 +507,17 @@ type FeeDelegateDynamicFeeTx struct {
 
 | 파일 | 역할 |
 |------|------|
-| `core/types/feedelegate_dynamic_fee_tx.go` | 트랜잭션 타입 정의 |
+| `core/types/feedelegate_dynamic_fee_tx.go` | 트랜잭션 타입 정의, `SetSenderTx` |
 | `core/types/transaction.go:48` | `FeeDelegateDynamicFeeTxType = 22` 상수 |
-| `core/types/transaction_signing.go` | Sender/FeePayer 서명 처리 |
+| `core/types/transaction.go: AsMessage()` | 타입 기반 FeePayer 검증 진입점 |
+| `core/types/transaction_signing.go` | Sender/FeePayer 서명 처리, **`RecoverFeePayer`**, `ErrFeePayerNotSet`, `ErrInvalidFeePayer` |
 | `core/state_transition.go` | FeePayer 잔액 차감 처리 |
-| `internal/ethapi/api.go` | `SignRawFeeDelegateTransaction()` 등 RPC |
+| `core/error.go` | `ErrFeePayerInsufficientFunds` *(`ErrInvalidFeePayer`는 `core/types`로 이동)* |
+| `internal/ethapi/api.go` | `SignRawFeeDelegateTransaction()` 등 RPC *(FeePayer 검증은 제거됨)* |
 | `internal/ethapi/transaction_args.go` | `FeePayer`, `FV/FR/FS` JSON 필드 |
-| `core/tx_pool.go` | Applepie 게이팅 |
+| `core/tx_pool.go` | Applepie 게이팅 + `RecoverFeePayer` + FeePayer 잔액 검사 |
+| `light/txpool.go` | 라이트 클라이언트 측 동일 검증 |
+| `core/types/transaction_test.go` | `TestRecoverFeePayer`, `TestAsMessageFeeDelegation`, `TestSetSenderTxAccessListPreserved` |
 
 ---
 
@@ -468,25 +531,28 @@ type FeeDelegateDynamicFeeTx struct {
 
 ```go
 type BriocheConfig struct {
-    BlockReward       *big.Int  // 초기 블록 보상 (Wei)
+    BlockReward       *big.Int  // 초기 블록 보상 (Wei). 설정 시 defaultReward를 덮어씀
     FirstHalvingBlock *big.Int  // nil → halving 비활성. 이 블록부터 halving 시작
     HalvingPeriod     *big.Int  // 반감 주기 (블록 수)
     FinishRewardBlock *big.Int  // 이 블록 이후 보상 0 (nil → 무한 지속)
-    HalvingTimes      *big.Int  // 최대 반감 횟수
-    HalvingRate       *big.Int  // 반감 비율 (% — 50이면 절반)
+    HalvingTimes      uint64    // 최대 반감 횟수 (0 → halving 없음)
+    HalvingRate       uint32    // 반감 비율 (% — 50이면 절반, 100이면 무반감, >100이면 증가)
 }
 ```
 
-### 보상 계산 흐름 (`GetBriocheBlockReward`)
+### 보상 계산 흐름 (`GetBriocheBlockReward` → `calcHalvedReward`)
 
 ```
-1. num >= FinishRewardBlock              → 0
-2. FirstHalvingBlock 미설정 또는 num < FirstHalvingBlock
-   → defaultReward (= EnvStorageImp.getBlockRewardAmount())
+0. blockReward = BlockReward (설정 시) 아니면 defaultReward
+1. FinishRewardBlock != nil && num >= FinishRewardBlock  → 0
+2. FirstHalvingBlock/HalvingPeriod 미설정, HalvingTimes == 0,
+   또는 num < FirstHalvingBlock                          → blockReward 그대로
 3. elapsed = num - FirstHalvingBlock
-4. halvings = min(elapsed / HalvingPeriod, HalvingTimes)
-5. reward = BlockReward * (HalvingRate / 100)^halvings
+4. times   = min(1 + elapsed / HalvingPeriod, HalvingTimes)   ← 1부터 시작
+5. reward  = blockReward * HalvingRate^times / 100^times
 ```
+
+> **`times`는 0이 아니라 1부터 시작한다.** `FirstHalvingBlock` 블록 자체가 이미 1차 반감이 적용된 시점이다 (`params/config.go:464`의 `common.Big1 + elapsed/HalvingPeriod`). 보상 곡선을 손으로 검산할 때 흔히 틀리는 지점.
 
 ### Mainnet vs Testnet 활성 블록
 
@@ -494,6 +560,10 @@ type BriocheConfig struct {
 |------|--------:|--------:|
 | `BriocheBlock` | 53,525,500 | 59,414,700 |
 | `FirstHalvingBlock` | 53,525,500 | 59,414,700 |
+| `BlockReward` | 1e18 | 1e18 |
+| `HalvingPeriod` | 63,115,200 | 63,115,200 |
+| `HalvingTimes` | 16 | 16 |
+| `HalvingRate` | 50 | 50 |
 | `FinishRewardBlock` | 2,467,714,000 (≈2101-01-01 KST) | 2,473,258,000 (≈2100-12-01 KST) |
 
 ### 수정 시 주의사항
@@ -525,12 +595,29 @@ wemix/sync.go: loadMiningToken()
 wemix/etcdutil.go:
    ma.acquireToken(ctx, height, ttl)        — 토큰 획득 (CAS 기반)
    ma.acquireTokenSync(ctx, height, hash, parentHash, ttl)
+   ma.etcdResetWork(token, newWork)          — 토큰 보유 중일 때만 wemixWorkKey 갱신 (CAS)
    lck.renew(ctx, ttl)                       — TTL 갱신
    lck.release(ctx)                          — 토큰 반환
    lck.releaseTokenSync(ctx, height, hash, parentHash) — 동기 반환
 
 wemix/spinlock.go: SpinLock — 토큰 임계 영역 보호
 ```
+
+### `syncCheck` — stale work 덮어쓰기 방지 (`wemix/sync.go:247`)
+
+노드가 `SyncIdleThreshold` 동안 진전이 없으면 `syncCheck`가 `wemixWorkKey`를 재설정한다. 이 경로는 잘못 쓰면 **클러스터 전체의 마이닝 타깃을 오염**시키므로 여러 겹의 가드가 걸려 있다. 순서대로:
+
+| 단계 | 가드 | 이유 |
+|------|------|------|
+| 피어 수집 | `getMiners("", MiningTokenTTL/2)` | 수집 타임아웃이 토큰 TTL보다 짧아야 `etcdResetWork`까지 토큰이 살아 있다. TTL 이상이면 다른 노드가 work를 진행시킨 뒤 stale 값으로 덮어쓴다 |
+| 거버넌스 캐시 | `len(nodes) == 0` → abort | 거버넌스 노드 목록이 비면 정족수를 판단할 근거가 없다 |
+| work가 앞설 때 | 피어 state 1개라도 `(work.Height, work.Hash)`를 echo하면 catch-up으로 보고 조용히 종료 | 동기화 중에는 `HeaderByHash(work.Hash)`가 항상 NotFound라 reachability 게이트만 쓰면 매 사이클 오탐 로그가 발생 |
+| 합의 블록 도달성 | `HeaderByHash(consensusHash)` 실패 → abort | 로컬 체인에 없는 해시를 쓰면 모든 검증자의 `acquireTokenSync`가 `ErrInvalidWork`로 영구 실패 |
+| 해시/높이 정합 | `peerHeader.Number != consensusHeight` → abort | 실제 해시 + 가짜 높이 조합(정족수 조작)이 도달성 검사와 회귀 가드 사이를 빠져나가는 구멍을 막음 |
+| 높이 역행 | `consensusHeight < header.Number` → abort | 오래된(여전히 canonical인) 해시를 echo해 마이닝 타깃을 뒤로 밀어버리는 공격 차단 |
+| 최종 기록 | `admin.etcdResetWork(token, newWork)` | 토큰을 여전히 보유 중일 때만 CAS로 기록. 만료됐으면 `ErrInvalidToken`으로 거부 |
+
+> **`etcdResetWork` 앞에서 `renew()`를 호출하지 말 것.** `renew`는 토큰의 `Till`을 갱신하는데, `etcdResetWork`는 in-memory 토큰을 직렬화한 값과 etcd에 저장된 값을 `Compare`한다. `renew` 후에는 두 값이 어긋나 CAS가 항상 실패한다 (`wemix/sync.go:442-444`의 WARNING 주석).
 
 ### 블록 빌드 파라미터
 
@@ -565,6 +652,7 @@ wemix/spinlock.go: SpinLock — 토큰 임계 영역 보호
 | `etcdIsRunning()` | 서버 실행 여부 |
 | `acquireToken(ctx, height, ttl)` | 마이닝 토큰 획득 |
 | `releaseTokenSync(...)` | 동기 반환 (블록 확정 시) |
+| `etcdResetWork(token, newWork)` | **토큰 보유 확인 후에만** `wemixWorkKey` 기록 (etcd Txn CAS). 토큰 불일치/부재 시 `ErrInvalidToken` |
 
 ### 임베디드 etcd 설정
 
@@ -623,7 +711,68 @@ wemix/admin.go: NewWemixAdmin()
 
 ---
 
-## 15. CI/CD
+## 15. StatusEx 신뢰 경계 & wemixWorkKey 보호
+
+Wemix 노드는 파트너 노드끼리 `StatusEx` 메시지로 서로의 최신 블록 상태를 교환하고, 그 집합(`miningPeers`)에서 `findConsensusBlock`이 정족수 블록을 뽑아 `wemixWorkKey`(= 클러스터 공통 마이닝 타깃)를 결정한다. 즉 **`StatusEx` 페이로드는 합의 입력**이며, 하나의 침해된 파트너가 이 경로로 클러스터를 정지시킬 수 있다.
+
+관련 회귀 테스트: `wemix/sync_regression_test.go` (32KB) — 각 항목마다 pre-fix 재현과 post-fix 방어가 쌍으로 들어 있다.
+
+### 불변식 1 — NodeName은 거버넌스 조회로만 결정된다
+
+`eth/protocols/eth/wemix_handlers.go: handleStatusEx()`
+
+```go
+// 페이로드의 NodeName은 공격자가 통제한다. 검증된 peer.ID()를
+// 거버넌스 등록 이름으로 해석해 덮어쓰고, 미등록 피어는 드롭한다.
+nodeName, ok := wemixminer.NodeNameForPeerID(peer.ID())
+if !ok {
+    return fmt.Errorf("%w: unknown peerID %v", errDecode, peer.ID())
+}
+status.NodeName = nodeName
+```
+
+- 페이로드의 `NodeName`을 그대로 믿으면, 침해된 파트너 **1대가 여러 거버넌스 이름을 사칭해 `miningPeers`에 다중 엔트리를 심고 `findConsensusBlock` 정족수를 위조**할 수 있다.
+- 조회 경로: `wemix/admin.go: NodeNameForPeerID()` → `wemix/miner/miner.go: NodeNameForPeerIDFunc` (프로토콜 레이어가 `wemix/admin`을 직접 import하지 않도록 하는 함수 변수 IoC).
+- 신뢰 경계는 **핸들러 한 곳에 모여 있다.** 다운스트림(`getMiners`, `collectMinerStates`, `miningPeers`)은 그대로 node name을 키로 쓴다. 여기서 검증을 빼고 하위에서 방어하려는 리팩터링은 금지.
+- 회귀 테스트: `TestNodeNameRebind_PreventsQuorumForgery`, `TestRegression_SpoofedStatusExPoisonsWorkKey`
+
+### 불변식 2 — RLP에서 생략된 `*big.Int`는 nil이다
+
+RLP 페이로드에서 필드를 빼면 `*big.Int`가 nil로 디코드된다. 크래프트된 메시지 한 통이 패닉을 일으킬 수 있는 지점이 세 곳 있었다:
+
+| 위치 | 방어 |
+|------|------|
+| `handleStatusEx` decode 직후 | `status.LatestBlockHeight == nil` → 즉시 거부. 다운스트림 `wemix/miner_limit.go: electNextMiner`가 `.Int64()`를 nil 가드 없이 호출하기 때문 |
+| `handleStatusEx` 내부 goroutine | `status.LatestBlockTd != nil &&` 를 `Cmp(td)` 앞에 둠 |
+| `wemix/api/api.go: Clone()` | `safeBig()` 헬퍼로 `LatestBlockHeight`/`LatestBlockTd`/`RttMs` 복사. `new(big.Int).Set(nil)`은 패닉 |
+
+정상 송신자는 `getMinerStatus`에서 `header.Number`로 항상 채우므로, nil은 오직 크래프트 페이로드에서만 도달한다. **경계에서 거부**하는 것이 정책이며, 호출처마다 가드를 다는 방식으로 되돌리지 말 것.
+
+회귀 테스트: `TestRegression_NilLatestBlockHeightPanicsElectNextMiner`, `TestNilLatestBlockHeightGuard_RejectedAtHandler`, `TestRegression_NilLatestBlockTdPanicsHandler`, `TestNilLatestBlockTdGuard_PreventsHandlerPanic`, `TestWemixMinerStatus_Clone_NilSafe`
+
+### 불변식 3 — `wemixWorkKey`에 쓰기 전 3중 검증
+
+`syncCheck`의 도달성 / 해시·높이 정합 / 높이 역행 가드 (§12 표) 세 가지는 **각각 다른 구멍을 막는다.** 하나라도 빼면:
+
+- 도달성 없음 → 로컬에 없는 해시가 기록되어 모든 검증자의 `acquireTokenSync`가 영구 `ErrInvalidWork`
+- 해시·높이 정합 없음 → (진짜 해시 + 가짜 높이) 조합이 나머지 둘을 통과해 내부 모순 값이 기록됨
+- 높이 역행 없음 → 오래된 canonical 해시로 마이닝 타깃을 뒤로 밀어 블록 생산 정지
+
+회귀 테스트: `TestRegression_StaleConsensusHeightBlocked`, `TestRegression_EndToEndAttackChain`
+
+### 의도적으로 채택하지 않은 방어
+
+리뷰 중 도입했다가 되돌린 것들이다. **다시 제안하기 전에 아래 근거를 확인할 것.**
+
+| 제안 | 철회 이유 |
+|------|-----------|
+| StatusEx per-peer rate limit (5초 최소 간격) | 1초 블록 환경에서 `admin.wemixNodes` RPC를 블록 주기로 폴링하는 운영 대시보드의 정상 응답을 ~80% 드롭시킨다. 상수를 조정해도 트레이드오프를 벗어날 수 없다 (폴링 주기 이상이면 드롭 발생, 이하면 DoS 방어 무의미). 원래 막으려던 정족수 위조는 불변식 1이 이미 커버 |
+| `release()` 시 `wemixWorkKey` 자가 복구 (`maybeRecoverWorkKey`) | 느린 동기화 중이거나 소수 포크에 있는 파트너가 **정상 etcd 값을 자기 lagging head로 덮어써** 클러스터 전체를 오염시킨다. 도달성 검사만으로는 이 둘을 구분할 수 없음 |
+| `findConsensusBlock` 결과에 정족수 요구 (work-ahead catch-up 판정) | 연결된 악성 피어 1대가 임의 값을 echo할 수 있으므로, all-honest가 아닌 어떤 정족수 크기도 공격자 메시지 1건에 영향받는다. 현재 정책은 side-effect 최소화 + 다운스트림 가드에 위임 |
+
+---
+
+## 16. CI/CD
 
 ### GitHub Actions
 
@@ -652,7 +801,7 @@ Dockerfile.wemix    — gwemix 전용 (RocksDB 정적 빌드용 빌더 이미지
 
 ---
 
-## 16. 제네시스 생성
+## 17. 제네시스 생성
 
 ### 도구 / 입력
 
@@ -698,7 +847,7 @@ NCPExit / NCPExitImp        (Pangyo 이후)
 
 ---
 
-## 17. 주요 설정값 참조
+## 18. 주요 설정값 참조
 
 ### 가스/수수료 (대부분 EnvStorage 동적, 일부 protocol_params.go)
 
@@ -737,23 +886,31 @@ NCPExit / NCPExitImp        (Pangyo 이후)
 1. **`wemix/bind/gen_*_abi.go` 직접 수정 금지** — `wemix/governance-contract/`에서 Solidity 재컴파일 후 abigen으로 재생성
 2. **`gen_*.go`, `*.pb.go` 직접 수정 금지** — 도구로 재생성
 3. **`core/wemix_genesis.go`의 임베디드 alloc**은 운영 네트워크 상태이므로 변경 금지 — 신규 네트워크는 별도 제네시스 파일 사용
+4. **`wemix/governance-contract/contracts/mock/*.sol` 수정 금지** — 취약했던 시점을 보존한 red→green 회귀 픽스처 (§6)
 
 ### 하드포크/업그레이드
-4. **하드포크 추가 시 블록 번호 순서 검증** — 이전 포크 블록보다 반드시 크거나 같아야 함 (`CheckConfigForkOrder`)
-5. **거버넌스 컨트랙트 ABI 변경 시 4종 동반 갱신** — Solidity / Go 바인딩 / 제네시스 / 운영 절차 (§8)
-6. **Brioche 하드포크 활성 후 보상 계산 경로 분기** — `BriocheConfig.GetBriocheBlockReward` 사용 (§11)
+5. **하드포크 추가 시 블록 번호 순서 검증** — 이전 포크 블록보다 반드시 크거나 같아야 함 (`CheckConfigForkOrder`)
+6. **거버넌스 컨트랙트 ABI 변경 시 4종 동반 갱신** — Solidity / Go 바인딩 / 제네시스 / 운영 절차 (§8)
+7. **Brioche 하드포크 활성 후 보상 계산 경로 분기** — `BriocheConfig.GetBriocheBlockReward` 사용. halving 횟수는 **1부터** 시작 (§11)
 
 ### 트랜잭션/보안
-7. **Fee Delegation `setSignatureValues`는 FeePayer 서명** — Sender 서명이 아님 (§10)
-8. **`Applepie` 이전 블록에서 Fee Delegation tx 금지** — txpool에서 거부되어야 함
-9. **거버넌스 호출은 항상 Registry 경유** — 컨트랙트 주소 하드코딩 금지 (UUPS 업그레이드로 주소 보존, 구현만 변경)
+8. **Fee Delegation `setSignatureValues`는 FeePayer 서명** — Sender 서명이 아님 (§10)
+9. **`Applepie` 이전 블록에서 Fee Delegation tx 금지** — txpool에서 거부되어야 함
+10. **FeePayer 검증은 `types.RecoverFeePayer` 단일 진입점** — RPC 레이어에 중복 검증 되살리지 말 것. 분기 기준은 FeePayer nil 여부가 아니라 **tx 타입** (§10)
+11. **`SetSenderTx`의 AccessList는 `make` 후 `copy`** — 사전 할당 없이 `copy`하면 전부 유실 (§10)
+12. **`StatusEx`의 `NodeName`은 거버넌스 조회로만 결정** — 페이로드 값을 신뢰하면 정족수 위조 가능 (§15)
+13. **RLP `*big.Int` nil 가드는 핸들러 경계에서** — 호출처마다 가드하는 방식으로 되돌리지 말 것 (§15)
+14. **`wemixWorkKey` 기록 전 3중 검증 유지** — 도달성 / 해시·높이 정합 / 높이 역행. 각각 다른 구멍을 막음 (§12, §15)
+15. **`etcdResetWork` 직전에 `renew()` 호출 금지** — 토큰 `Till`이 갱신되어 CAS가 항상 실패 (§12)
+16. **거버넌스 호출은 항상 Registry 경유** — 컨트랙트 주소 하드코딩 금지 (UUPS 업그레이드로 주소 보존, 구현만 변경)
 
 ### 운영
-10. **etcd `etcdutil.go.new` 파일은 무시** — 빌드 비참여 (`etcdutil.go`만 운영) (§13)
-11. **`wemix/admin.go`는 43KB 단일 파일** — 함수 단위로 신중하게 수정, 무관한 영역 동시 편집 금지
-12. **wemixminer 함수 변수 주입은 `wemix/admin.go` 초기화 시점에 1회만** — 런타임 재설정 금지
+17. **etcd `etcdutil.go.new` 파일은 무시** — 빌드 비참여 (`etcdutil.go`만 운영) (§13)
+18. **`wemix/admin.go`는 43KB 단일 파일** — 함수 단위로 신중하게 수정, 무관한 영역 동시 편집 금지
+19. **wemixminer 함수 변수 주입은 `wemix/admin.go` 초기화 시점에 1회만** — 런타임 재설정 금지
 
 ### 빌드/배포
-13. **PR 전 로컬 확인** — `make lint && make test-short && make gwemix`
-14. **Go 버전 1.19 고정** — `go.mod` 변경 시 의존성 호환성 확인
-15. **RocksDB 통합은 Linux 빌드에서만 활성** — darwin/Windows 빌드 시 `USE_ROCKSDB=NO` 자동 적용
+20. **PR 전 로컬 확인** — `make lint && make test-short && make gwemix`
+21. **Go 버전 1.19 고정** — `go.mod` 변경 시 의존성 호환성 확인
+22. **RocksDB 통합은 Linux 빌드에서만 활성** — darwin/Windows 빌드 시 `USE_ROCKSDB=NO` 자동 적용
+23. **`logrot` 동작 변경은 이 저장소가 아님** — `cmd/logrot/main.go`는 wrapper, 본체는 외부 모듈 `github.com/charlanxcc/logrot`
