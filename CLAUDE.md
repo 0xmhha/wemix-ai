@@ -18,8 +18,10 @@ make devtools           # 코드 생성 도구 설치 (stringer, gencodec, proto
 
 ## 프로젝트 구조
 
-- 빌드 참여 파일: `.claude/docs/BUILD_SOURCE_FILES.md` 참조
+- 빌드 참여 파일 + 테스트 코드 목록: `.claude/docs/BUILD_SOURCE_FILES.md` 참조
+  (`gwemix` = 120 패키지 / 630 파일, 테스트 302개 / `logrot` = 1 파일 wrapper)
 - 메인 클라이언트: `cmd/gwemix/`
+- 로그 로테이션: `cmd/logrot/` — 진입점만 있고 본체는 외부 모듈 `github.com/charlanxcc/logrot`
 - 합의/마이닝 토큰: `wemix/` (admin.go, etcdutil.go, sync.go, miner_limit.go, spinlock.go)
 - 거버넌스 Go 바인딩: `wemix/bind/gen_*_abi.go` *(수동 편집 금지 — abigen 재생성)*
 - 거버넌스 Solidity: `wemix/governance-contract/contracts/`
@@ -47,10 +49,10 @@ make devtools           # 코드 생성 도구 설치 (stringer, gencodec, proto
 
 Pangyo → Applepie → **Brioche** (블록 리워드 halving) → **Croissant** (WBFT 합의 전환 — 별도 빌드)
 
-- Pangyo: 초기 PoA 활성화
-- Applepie: Fee Delegation 트랜잭션 활성화
-- Brioche: 블록 리워드 halving 곡선 — `BriocheBlock`, `BriocheConfig`
-- Croissant: WBFT 합의 전환 (go-wbft에서 처리)
+- Pangyo: 초기 PoA 활성화 — Mainnet 0 / Testnet 10,000,000
+- Applepie: Fee Delegation 트랜잭션 활성화 — Mainnet 20,476,911 / Testnet 26,240,268
+- Brioche: 블록 리워드 halving 곡선 (`BriocheBlock`, `BriocheConfig`) — Mainnet 53,525,500 / Testnet 59,414,700
+- Croissant: WBFT 합의 전환 (go-wbft에서 처리) — **활성 블록 미설정(nil)**, 필드·`IsCroissant`·포크 순서 검사만 준비됨
 
 ## 핵심 용어
 
@@ -86,6 +88,24 @@ Pangyo → Applepie → **Brioche** (블록 리워드 halving) → **Croissant**
 - `wemix/bind/gen_*_abi.go`는 abigen 산출물 — 수동 편집 금지, Solidity 변경 후 재생성
 - `core/wemix_genesis.go`는 운영 네트워크 제네시스 — 변경 시 라이브 상태에 영향, 신중히 검토
 - 하드포크 추가/변경 시 `params/config.go`의 4종(필드/Is*/CheckConfigForkOrder/CheckCompatible) 모두 갱신
+
+## 보안 불변식 (되돌리지 말 것)
+
+이미 취약점으로 확인되어 방어가 들어간 지점이다. 상세는 `.claude/docs/CLAUDE_DEV_GUIDE.md` §15,
+`.claude/docs/GOVERNANCE_FLOW.md` §6.
+
+| 영역 | 불변식 |
+|------|--------|
+| StatusEx 신뢰 경계 | `NodeName`은 `NodeNameForPeerID(peer.ID())` 거버넌스 조회로만 결정. 페이로드 값 신뢰 시 정족수 위조 가능 |
+| RLP nil 가드 | `LatestBlockHeight`/`LatestBlockTd`/`RttMs`의 nil 검사는 **핸들러 경계**에서. 호출처별 가드로 되돌리지 말 것 |
+| wemixWorkKey | 기록 전 도달성 / 해시·높이 정합 / 높이 역행 3중 검증 + `etcdResetWork` CAS. `renew()`를 CAS 직전에 호출 금지 |
+| FeePayer 검증 | `types.RecoverFeePayer` 단일 진입점. tx **타입** 기준 분기(FeePayer nil 여부 아님). RPC 레이어 중복 검증 부활 금지 |
+| AccessList 복사 | `SetSenderTx`는 `make` 후 `copy` — 사전 할당 없으면 전부 유실 |
+| 거버넌스 임의 실행 | `addProposalToExecute` / `BallotTypes.Execute` / `createBallotForExecute`는 의도적 제거. 복원 금지 |
+| mock 픽스처 | `wemix/governance-contract/contracts/mock/*.sol`은 버그 보존용 red→green 픽스처 — 수정 금지 |
+
+관련 회귀 테스트: `wemix/sync_regression_test.go`, `wemix/etcd_test.go`, `wemix/api/api_test.go`,
+`core/types/transaction_test.go`, `wemix/governance-contract/test/gov_test.go`
 
 ## 코드 컨벤션
 

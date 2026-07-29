@@ -17,25 +17,27 @@ type ChainConfig struct {
     PangyoBlock    *big.Int  // 거버넌스 활성화 임계
     ApplepieBlock  *big.Int  // Fee Delegation 활성
     BriocheBlock   *big.Int  // 보상 곡선 변경
-    CroissantBlock *big.Int  // (예정)
+    CroissantBlock *big.Int  // WBFT 전환 (Mainnet/Testnet 모두 아직 nil)
 
     Brioche *BriocheConfig    // halving 파라미터
     // ...
 }
 ```
 
-### BriocheConfig (`params/config.go`)
+### BriocheConfig (`params/config.go:433~`)
 
 ```go
 type BriocheConfig struct {
-    BlockReward       *big.Int  // 초기 블록 보상
-    FirstHalvingBlock *big.Int  // 첫 halving 시작 블록
+    BlockReward       *big.Int  // 초기 블록 보상 (설정 시 defaultReward를 덮어씀)
+    FirstHalvingBlock *big.Int  // 첫 halving 시작 블록 (nil → halving 비활성)
     HalvingPeriod     *big.Int  // 반감 주기 (블록 수)
-    FinishRewardBlock *big.Int  // 이 블록 이후 보상 0
-    HalvingTimes      *big.Int  // 최대 반감 횟수
-    HalvingRate       *big.Int  // 반감율 (%)
+    FinishRewardBlock *big.Int  // 이 블록 이후 보상 0 (nil → 무한 지속)
+    HalvingTimes      uint64    // 최대 반감 횟수 (0 → halving 없음)
+    HalvingRate       uint32    // 반감율 (% — 100이면 무반감, >100이면 증가)
 }
 ```
+
+> `HalvingTimes`/`HalvingRate`는 `*big.Int`가 아니라 `uint64`/`uint32`다. 반감 횟수는 `min(1 + elapsed/HalvingPeriod, HalvingTimes)`로 **1부터** 센다.
 
 ### Registry Domain Keys (`wemix/bind/const.go`)
 
@@ -304,7 +306,53 @@ implementation: GovImp v1            upgradeTo(GovImp v2)
 
 ---
 
-## 6. Hardfork ↔ Governance Interaction
+## 6. GovImp 보안 불변식 (제거된 기능 & W1G 대응)
+
+거버넌스 컨트랙트를 수정하거나 "예전에 있던 기능"을 복원하려 할 때 먼저 확인할 것. 회귀 테스트는 전부 `wemix/governance-contract/test/gov_test.go`에 있다.
+
+### 6.1 제거된 기능 — 임의 실행 발의 (`Execute` ballot)
+
+`addProposalToExecute`는 **검증 불가능한 calldata로 임의의 컨트랙트 호출을 실행**할 수 있어 통째로 제거되었다. 함께 사라진 것:
+
+| 대상 | 파일 |
+|------|------|
+| `addProposalToExecute()` | `contracts/GovImp.sol` |
+| `BallotTypes.Execute` enum 값 | `contracts/abstract/BallotEnums.sol` |
+| `createBallotForExecute()`, `getBallotExecute()` | `contracts/interface/IBallotStorage.sol`, `contracts/storage/BallotStorageImp.sol` |
+
+> **복원 금지.** 거버넌스로 실행해야 할 새 동작이 있으면, 임의 calldata 실행이 아니라 **전용 발의 타입 + 전용 실행 경로**로 추가한다. `BallotTypes`에 값을 되살리면 enum 순서가 바뀌어 기존 투표 저장소와도 어긋난다.
+
+### 6.2 멤버 인덱스 무결성 (`removeMember`)
+
+`removeMember`의 인덱스 해석은 staker 주소가 아니라 **실제 reward / voter 주소를 조회 키로** 사용해야 한다. staker 키로 조회하면 staker·voter·reward가 분리된 멤버에서 잘못된 인덱스가 나와 스토리지가 깨진다.
+
+- 노드 스토리지 포인터 바인딩은 **실제 노드 인덱스가 확정된 뒤에** 수행 (앞당기면 데이터 손상)
+- 제거 인덱스는 종류별로 별도 변수 사용, 각 인덱스에 명시적 검증 가드
+- 회귀 테스트: `TestGov_IndexCorruptionAfterRemoveMember`
+
+### 6.3 CertiK W1G 대응 불변식
+
+| ID | 불변식 | 회귀 테스트 |
+|----|--------|------------|
+| W1G-01 | add-member 발의가 **실행되는 시점에** 노드 유일성을 재검증한다 (발의 시점 검사만으로는 그 사이 중복이 들어올 수 있음) | `TestW1G01_DuplicateNodeRejectedAtExecution`, `TestW1G01_Legacy_DuplicateNode_RedThenGreen` |
+| W1G-02 | 오래된 제거 발의가 뒤늦게 실행되어도 **마지막 남은 멤버는 제거되지 않는다** (거버넌스 공백 방지) | `TestW1G02_StaleRemovalCannotEmptyGovernance`, `TestW1G02_Legacy_EmptyGovernance_RedThenGreen` |
+| W1G-03 | 재초기화(reInit)·마이그레이션 시 **노드 유일성 마커를 보존**한다. 인덱스는 0이 아니라 `1..N` | `TestW1G03_MigrateFromLegacyIntegrity`, `TestW1G03_PreMarker_ReInitOffByOne_RedThenGreen`, `TestW1G03_Legacy_MigratePreservesSeparation` |
+| W1G-04 | 멤버 변경·제거는 **실제 staker 키**를 요구한다 (voter 전용 주소로는 불가) | `TestW1G04_StakerVoterSeparationLifecycle`, `TestW1G04_VotedPathRejectsVoterOnlyTarget`, `TestW1G04_RewardSeparationLedger`, `TestW1G04_Legacy_Slot0Poison_RedThenGreen` |
+
+외부 revert 메시지와 이벤트 문자열은 변경되지 않았다 — 운영 도구 호환성 유지를 위한 의도적 제약이다.
+
+### 6.4 red→green 픽스처 (수정 금지)
+
+| 파일 | 역할 |
+|------|------|
+| `contracts/mock/GovImpLegacy.sol` | 취약했던 시점의 GovImp. 이 위에 원장을 쌓아 문제를 재현한 뒤 프록시를 신구현으로 업그레이드해 해소를 확인한다 |
+| `contracts/mock/GovImpPreMarker.sol` | 노드 유일성 마커가 비어 있는 상태 — W1G-03 off-by-one의 실제 검증력을 담당 |
+
+두 파일은 **버그를 그대로 보존하는 것이 존재 이유**다. 최신 GovImp에 맞춰 "고치면" 회귀 테스트가 무의미해진다. `TestW1G_LegacyUpgrade_FullLifecycle`이 레거시→신구현 업그레이드 전 과정을 검증한다.
+
+---
+
+## 7. Hardfork ↔ Governance Interaction
 
 | 하드포크 | 거버넌스 영향 |
 |----------|---------------|
@@ -322,7 +370,7 @@ implementation: GovImp v1            upgradeTo(GovImp v2)
 
 ---
 
-## 7. File Reference
+## 8. File Reference
 
 | 파일 | 역할 |
 |------|------|
@@ -341,6 +389,13 @@ implementation: GovImp v1            upgradeTo(GovImp v2)
 | `wemix/governance-contract/contracts/GovImp.sol` | 거버넌스 구현 (UUPS) |
 | `wemix/governance-contract/contracts/storage/EnvStorageImp.sol` | 체인 파라미터 저장소 (UUPS) |
 | `wemix/governance-contract/contracts/StakingImp.sol` | 스테이킹 구현 (UUPS) |
-| `wemix/governance-contract/contracts/BallotStorage.sol` | 투표·발의 영구 저장 |
+| `wemix/governance-contract/contracts/storage/BallotStorageImp.sol` | 투표·발의 영구 저장 |
+| `wemix/governance-contract/contracts/abstract/BallotEnums.sol` | 발의 종류 enum (`Execute` 제거됨 — §6.1) |
+| `wemix/governance-contract/contracts/interface/IBallotStorage.sol` | BallotStorage 인터페이스 |
 | `wemix/governance-contract/contracts/NCPExitImp.sol` | NCP 퇴출 처리 (UUPS) |
+| `wemix/governance-contract/contracts/TestnetGovImp.sol` | Testnet 전용 GovImp 변형 |
+| `wemix/governance-contract/contracts/mock/GovImpLegacy.sol` | red→green 회귀 픽스처 — **수정 금지** (§6.4) |
+| `wemix/governance-contract/contracts/mock/GovImpPreMarker.sol` | 노드 마커 미설정 상태 픽스처 — **수정 금지** (§6.4) |
 | `wemix/governance-contract/compiler.go` | solc 0.8.14 호출 헬퍼 |
+| `wemix/governance-contract/test/gov_test.go` | 거버넌스 시나리오 + W1G 회귀 테스트 |
+| `wemix/governance-contract/test/gov_bind_test.go` | abigen 바인딩 정합성 |
