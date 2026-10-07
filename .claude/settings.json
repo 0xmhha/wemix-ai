@@ -8,7 +8,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "#!/bin/bash\ninput=$(cat)\npath=$(echo \"$input\" | jq -r '.tool_input.file_path // empty' 2>/dev/null)\nif [[ -z \"$path\" ]]; then echo \"$input\"; exit 0; fi\nif [[ \"$path\" == *\"wemix/bind/gen_\"*\"_abi.go\" ]]; then echo '[wemix] WARNING: wemix/bind/gen_*_abi.go is abigen-generated. Edit Solidity in wemix/governance-contract/contracts/ and regenerate via go generate.' >&2; fi\nif [[ \"$path\" == *\"core/wemix_genesis.go\" ]]; then echo '[wemix] WARNING: core/wemix_genesis.go contains embedded mainnet/testnet genesis JSON. Modifying alters live network state — confirm intent.' >&2; fi\nif [[ \"$path\" == *\"/gen_\"*\".go\" || \"$path\" == *\"messages\"*\".pb.go\" ]]; then echo '[wemix] WARNING: looks auto-generated (gencodec / protobuf / rlpgen). Regenerate via the source tool instead of editing.' >&2; fi\nif [[ \"$path\" == *\"wemix/etcdutil.go.new\" ]]; then echo '[wemix] WARNING: etcdutil.go.new is NOT part of the build — runtime code lives in etcdutil.go.' >&2; fi\necho \"$input\""
+            "command": "#!/bin/bash\ninput=$(cat)\npath=$(echo \"$input\" | jq -r '.tool_input.file_path // empty' 2>/dev/null)\nif [[ -z \"$path\" ]]; then echo \"$input\"; exit 0; fi\nif [[ \"$path\" == *\"wemix/bind/gen_\"*\"_abi.go\" ]]; then echo '[wemix] WARNING: wemix/bind/gen_*_abi.go is abigen-generated. Edit Solidity in wemix/governance-contract/contracts/ and regenerate via go generate.' >&2; fi\nif [[ \"$path\" == *\"core/wemix_genesis.go\" ]]; then echo '[wemix] WARNING: core/wemix_genesis.go contains embedded mainnet/testnet genesis JSON. Modifying alters live network state — confirm intent.' >&2; fi\nif [[ \"$path\" == *\"/gen_\"*\".go\" || \"$path\" == *\"messages\"*\".pb.go\" ]]; then echo '[wemix] WARNING: looks auto-generated (gencodec / protobuf / rlpgen). Regenerate via the source tool instead of editing.' >&2; fi\necho \"$input\""
           }
         ]
       },
@@ -35,6 +35,7 @@
       "Bash(go test -short -count=1 ./wemix/...)",
       "Bash(go test -short -count=1 ./core/...)",
       "Bash(go test -short -count=1 ./params/...)",
+      "Bash(go test -short -count=1 ./miner/...)",
       "Bash(go list -deps ./cmd/gwemix/...)",
       "Bash(golangci-lint run *)",
       "Bash(gh pr view *)",

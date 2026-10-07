@@ -90,6 +90,8 @@ make test-short 2>&1 | tail -50
 - `wemix/` → `go test -short -count=1 ./wemix/...`
 - `core/types/` → `go test -short -count=1 ./core/types/...` (Fee Delegation 회귀)
 - `params/` → `go test -short -count=1 ./params/...` (하드포크 호환성)
+- `miner/` → `go test -short -count=1 ./miner/...` (토큰 획득 게이트, 타임스탬프 하한, 블록 크기 상한)
+- `core/block_validator.go` → `go test -short -count=1 -run TestValidateBody ./core/` (EIP-7934 블록 크기 상한)
 
 ### 2.4 실행 결과 요약
 

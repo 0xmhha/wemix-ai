@@ -130,7 +130,7 @@ abigen --abi=GovImp.abi --bin=GovImp.bin --pkg=gov --type=GovImp --out=wemix/bin
 
 ### Layer 4 — Go 호출 코드 추가
 
-위치: `wemix/admin.go` (43KB 단일 파일 — 신중하게 수정)
+위치: `wemix/admin.go` (약 42KB 단일 파일 — 신중하게 수정)
 
 ```go
 // 새 거버넌스 메서드 호출 예시
@@ -154,7 +154,7 @@ func (ma *wemixAdmin) callNewMethod(opts *bind.CallOpts) (*big.Int, error) {
 ```bash
 # 1. 키 / 비밀번호 / config.js 준비
 # 2. gwemix init <genesis.json>
-# 3. gwemix governancedeploy --config <config.json>
+# 3. gwemix wemix deploy-governance [--password <file>] [--url <url>] <config-file> <account-file> [lockAmount]
 #    → Registry / Staking / BallotStorage / EnvStorage / Gov 배포
 #    → EnvStorage 초기값 주입
 #    → 최초 멤버 등록 (Staking 락업 → Gov addMember)

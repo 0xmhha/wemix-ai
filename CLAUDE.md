@@ -20,7 +20,7 @@ make devtools           # 코드 생성 도구 설치 (stringer, gencodec, proto
 
 - 빌드 참여 파일 + 테스트 코드 목록: `.claude/docs/BUILD_SOURCE_FILES.md` 참조
   (`gwemix` = 120 패키지 / 630 파일, 테스트 302개 / `logrot` = 1 파일 wrapper)
-- 메인 클라이언트: `cmd/gwemix/`
+- 메인 클라이언트: `cmd/gwemix/` — `cmd/geth`를 가리키는 심볼릭 링크다. git log·diff에는 `cmd/geth/...` 경로로 찍힌다
 - 로그 로테이션: `cmd/logrot/` — 진입점만 있고 본체는 외부 모듈 `github.com/charlanxcc/logrot`
 - 합의/마이닝 토큰: `wemix/` (admin.go, etcdutil.go, sync.go, miner_limit.go, spinlock.go)
 - 거버넌스 Go 바인딩: `wemix/bind/gen_*_abi.go` *(수동 편집 금지 — abigen 재생성)*
@@ -98,14 +98,19 @@ Pangyo → Applepie → **Brioche** (블록 리워드 halving) → **Croissant**
 |------|--------|
 | StatusEx 신뢰 경계 | `NodeName`은 `NodeNameForPeerID(peer.ID())` 거버넌스 조회로만 결정. 페이로드 값 신뢰 시 정족수 위조 가능 |
 | RLP nil 가드 | `LatestBlockHeight`/`LatestBlockTd`/`RttMs`의 nil 검사는 **핸들러 경계**에서. 호출처별 가드로 되돌리지 말 것 |
-| wemixWorkKey | 기록 전 도달성 / 해시·높이 정합 / 높이 역행 3중 검증 + `etcdResetWork` CAS. `renew()`를 CAS 직전에 호출 금지 |
+| wemixWorkKey | 기록 전 도달성 / 해시·높이 정합 / 높이 역행 3중 검증 + `etcdResetWork` CAS. 토큰 TTL 갱신(구 `renew()`, v0.10.15에서 제거)을 다시 넣더라도 CAS 직전에 호출 금지 |
+| 마이닝 토큰 획득 | `worker.commitWork`는 `isRunning()`이 거짓이면 `AcquireMiningToken`을 호출하지 않는다. 블록 빌드와 토큰 반환이 `isRunning()` 뒤에 있어서, 멈춘 워커가 토큰을 잡으면 Till 만료까지 클러스터 전체가 멈춘다 |
+| 블록 크기 상한 | RLP 인코딩 블록은 `params.MaxBlockSize`(8 MiB, EIP-7934) 이하. 수신은 `ValidateBody`가 `ErrBlockOversized`로 거부하고, 생성은 `txFitsSize`가 1,000,000 바이트 여유를 두고 tx 패킹을 멈춘다. 하드포크 게이트 없이 항상 적용된다 |
+| 블록 타임스탬프 하한 | `worker.timeIt`의 하한은 `parent.Time()`이다. `parent.Number()`와 비교하던 버그가 v0.10.15에서 고쳐졌으니 되돌리지 말 것 |
+| etcd 자동 가입 | `etcdAutoJoin`은 `gap == 0`(피어 없음)이면 `ErrNotFound`로 일찍 반환한다. 이 가드가 없으면 `ct/tt`에서 0 나눗셈 panic이 나고, recover 없는 고루틴이라 프로세스가 죽는다 |
 | FeePayer 검증 | `types.RecoverFeePayer` 단일 진입점. tx **타입** 기준 분기(FeePayer nil 여부 아님). RPC 레이어 중복 검증 부활 금지 |
 | AccessList 복사 | `SetSenderTx`는 `make` 후 `copy` — 사전 할당 없으면 전부 유실 |
 | 거버넌스 임의 실행 | `addProposalToExecute` / `BallotTypes.Execute` / `createBallotForExecute`는 의도적 제거. 복원 금지 |
 | mock 픽스처 | `wemix/governance-contract/contracts/mock/*.sol`은 버그 보존용 red→green 픽스처 — 수정 금지 |
 
 관련 회귀 테스트: `wemix/sync_regression_test.go`, `wemix/etcd_test.go`, `wemix/api/api_test.go`,
-`core/types/transaction_test.go`, `wemix/governance-contract/test/gov_test.go`
+`core/types/transaction_test.go`, `core/block_validator_test.go`, `miner/worker_test.go`,
+`wemix/governance-contract/test/gov_test.go`
 
 ## 코드 컨벤션
 
