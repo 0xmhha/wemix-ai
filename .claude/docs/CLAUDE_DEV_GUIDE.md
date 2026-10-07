@@ -39,7 +39,7 @@
 | 항목 | 값 |
 |------|-----|
 | 바이너리 이름 | `gwemix` (+ 배포 tarball 동봉 `logrot`) |
-| 현재 버전 | **v0.10.14-stable** (`params/version.go`) |
+| 현재 버전 | **v0.10.15-stable** (`params/version.go`) |
 | Go 모듈 경로 | `github.com/ethereum/go-ethereum` *(geth fork — 모듈명 그대로 유지)* |
 | Go 버전 | 1.19 (go.mod 선언) |
 | Chain ID | Mainnet: **1111**, Testnet: **1112** *(`params/config.go`의 `WemixMainnetChainConfig.ChainID` 확인)* |
@@ -205,7 +205,7 @@ type Engine interface {
 
 ### Wemix 마이너 IoC
 
-파일: `wemix/admin.go:1557~` (`init()` 또는 setup 시점에 함수 변수 주입)
+파일: `wemix/admin.go:1519 init()` (패키지 초기화 시점에 함수 변수 주입)
 
 ```go
 wemixminer.SignBlockFunc            = signBlock
@@ -247,6 +247,8 @@ Wemix 고유 코드 (수정 시 필수 실행):
 | `wemix/sync_regression_test.go` | StatusEx 위조 / `wemixWorkKey` 오염 공격 체인의 pre-fix 재현 ↔ post-fix 방어 쌍 (§15) |
 | `wemix/api/api_test.go` | `WemixMinerStatus.Clone()` nil-safe 복사 |
 | `core/types/transaction_test.go` | Fee Delegation — `TestRecoverFeePayer`, `TestAsMessageFeeDelegation`, `TestSetSenderTxAccessListPreserved` |
+| `core/block_validator_test.go` | EIP-7934 블록 크기 상한 수신 경로 — `TestValidateBodyBlockOversized` (§12) |
+| `miner/worker_test.go` | 블록 크기 상한 생성 경로 `TestCommitTransactions[Simple]BlockSizeLimit`, 타임스탬프 하한 `TestTimeItTimestampLowerBound`, 멈춘 워커의 토큰 획득 생략 `TestSkipMiningTokenAcquisitionWhenWorkerStopped` (§12) |
 | `cmd/gwemix/*_test.go` | CLI / 제네시스 / `governancedeploy` 검증 (8개) |
 | `params/config_test.go` | 하드포크 순서·호환성 |
 
@@ -590,20 +592,34 @@ Wemix는 **Clique 변형 PoA** + **etcd 마이닝 토큰 락**의 조합으로 �
 ### 마이닝 토큰 흐름
 
 ```
-wemix/sync.go: loadMiningToken()
+miner/worker.go: commitWork()
+    ├─ !w.isRunning() → refreshPending 후 반환 (토큰을 잡지 않음)
+    └─ wemixminer.AcquireMiningToken(height, parentHash)
+         ↓
+wemix/sync.go: acquireMiningToken() → miningToken.Store(lck)
     ↓
 wemix/etcdutil.go:
-   ma.acquireToken(ctx, height, ttl)        — 토큰 획득 (CAS 기반)
-   ma.acquireTokenSync(ctx, height, hash, parentHash, ttl)
-   ma.etcdResetWork(token, newWork)          — 토큰 보유 중일 때만 wemixWorkKey 갱신 (CAS)
-   lck.renew(ctx, ttl)                       — TTL 갱신
-   lck.release(ctx)                          — 토큰 반환
-   lck.releaseTokenSync(ctx, height, hash, parentHash) — 동기 반환
+   ma.acquireToken(ctx, height, ttl)                     — 토큰 획득 (CAS 기반)
+   ma.acquireTokenSync(ctx, height, parentHash, ttl)     — work가 parent와 맞을 때만 획득
+   ma.etcdResetWork(token, newWork)                      — 토큰 보유 중일 때만 wemixWorkKey 갱신 (CAS)
+   lck.release(ctx)                                      — 토큰 반환
+   lck.releaseTokenSync(ctx, height, hash, parentHash)   — work 갱신과 함께 반환
 
+wemix/sync.go: loadMiningToken() / hasMiningToken()       — 보유 토큰 조회
 wemix/spinlock.go: SpinLock — 토큰 임계 영역 보호
 ```
 
-### `syncCheck` — stale work 덮어쓰기 방지 (`wemix/sync.go:247`)
+> v0.10.15에서 토큰 TTL 갱신 함수 `lck.renew()`가 쓰이지 않는 코드로 정리되며 삭제됐다. 같은 정리에서 `lockedPut`, `ttl2`도 사라졌다. 현재 토큰의 수명은 획득 시 정한 `Till`로만 결정된다.
+
+### 마이닝 토큰 획득 게이트 — 멈춘 워커는 토큰을 잡지 않는다
+
+`miner/worker.go: commitWork`는 PoA 모드에서 `AcquireMiningToken`을 부르기 **전에** `w.isRunning()`을 확인한다 (v0.10.15, #192).
+
+- 블록 빌드(`commitEx`)와 `ReleaseMiningToken`은 모두 `isRunning()` 뒤에 있다. 동기화 중처럼 워커가 멈춘 상태에서 토큰을 잡으면 반환할 경로가 없다.
+- 반환되지 않은 토큰은 `Till`이 지날 때까지 클러스터 공유 락을 쥐고 있다. 그동안 다른 노드도 블록을 만들지 못해 체인이 멈춘다.
+- 이 가드를 `AcquireMiningToken` 뒤로 옮기거나 빼지 말 것. 회귀 테스트: `TestSkipMiningTokenAcquisitionWhenWorkerStopped`
+
+### `syncCheck` — stale work 덮어쓰기 방지 (`wemix/sync.go:242`)
 
 노드가 `SyncIdleThreshold` 동안 진전이 없으면 `syncCheck`가 `wemixWorkKey`를 재설정한다. 이 경로는 잘못 쓰면 **클러스터 전체의 마이닝 타깃을 오염**시키므로 여러 겹의 가드가 걸려 있다. 순서대로:
 
@@ -617,7 +633,9 @@ wemix/spinlock.go: SpinLock — 토큰 임계 영역 보호
 | 높이 역행 | `consensusHeight < header.Number` → abort | 오래된(여전히 canonical인) 해시를 echo해 마이닝 타깃을 뒤로 밀어버리는 공격 차단 |
 | 최종 기록 | `admin.etcdResetWork(token, newWork)` | 토큰을 여전히 보유 중일 때만 CAS로 기록. 만료됐으면 `ErrInvalidToken`으로 거부 |
 
-> **`etcdResetWork` 앞에서 `renew()`를 호출하지 말 것.** `renew`는 토큰의 `Till`을 갱신하는데, `etcdResetWork`는 in-memory 토큰을 직렬화한 값과 etcd에 저장된 값을 `Compare`한다. `renew` 후에는 두 값이 어긋나 CAS가 항상 실패한다 (`wemix/sync.go:442-444`의 WARNING 주석).
+> **획득과 `etcdResetWork` 사이에서 토큰의 `Till`을 바꾸지 말 것.** `etcdResetWork`는 in-memory 토큰을 직렬화한 값과 etcd에 저장된 값을 `Compare`한다. 그 사이에 `Till`을 갱신하면 두 값이 어긋나 CAS가 항상 실패한다. 예전에는 `renew()`가 이 일을 했다. 함수는 v0.10.15에서 삭제됐지만 `wemix/sync.go:439-440`의 WARNING 주석은 여전히 `renew()`를 언급한다. TTL 갱신 기능을 다시 넣는다면 이 제약을 지켜야 한다.
+>
+> v0.10.15부터 `syncCheck`는 성공 경로에서 `nil`을 반환하고 `Info` 레벨로 로그를 남긴다. 예전에는 성공해도 `log.Error`를 찍었다. `wemixWorkKey` 값이 JSON으로 풀리지 않으면 에러 원인을 함께 로그에 남기고 work를 `nil`로 취급한다.
 
 ### 블록 빌드 파라미터
 
@@ -627,12 +645,42 @@ wemix/spinlock.go: SpinLock — 토큰 임계 영역 보호
 - `maxBaseFee`, `gasLimit`
 - `baseFeeMaxChangeRate`, `gasTargetPercentage`
 
+### 블록 타임스탬프 하한 (`miner/worker.go:1515 timeIt`)
+
+`timeIt`은 현재 시각(초)을 헤더 `Time`으로 쓰되, 부모 블록 시각보다 작아지지 않게 하한을 건다.
+
+```go
+timestamp = uint64(nowInSeconds)
+if timestamp < parent.Time() {
+    timestamp = parent.Time()
+}
+```
+
+v0.10.14까지는 `parent.Number()`와 비교하는 버그가 있었다 (#189). 블록 번호는 초 단위 시각보다 훨씬 작아서 하한이 사실상 걸리지 않았다. 시계가 뒤로 간 노드는 부모보다 이른 타임스탬프를 고를 수 있었다. 회귀 테스트: `TestTimeItTimestampLowerBound`
+
+블록이 모자라 서둘러야 할 때(`offset == -1`)는 같은 초에 블록이 몰리지 않도록 빌드 마감을 다음 초 경계로 미룬다.
+
+### 블록 크기 상한 — EIP-7934 (v0.10.15, #196)
+
+RLP 인코딩한 블록 크기는 `params.MaxBlockSize` = 8,388,608 바이트(8 MiB)를 넘을 수 없다. **하드포크 게이트가 없다.** 동기화로 받는 과거 블록을 포함해 모든 블록에 항상 적용된다.
+
+| 경로 | 위치 | 동작 |
+|------|------|------|
+| 수신 | `core/block_validator.go: ValidateBody` | 맨 앞에서 `block.Size() > MaxBlockSize`이면 `ErrBlockOversized`(`core/error.go`) 반환 |
+| 생성 | `miner/worker.go: environment.txFitsSize` | `env.size + tx.Size() < MaxBlockSize - maxBlockSizeBufferZone`(1,000,000)일 때만 tx를 담는다. `commitTransactions`와 `commitTransactionsSimple` 두 패킹 루프 모두 넘으면 즉시 `break` |
+| P2P | `eth/protocols/eth/protocol.go: maxMessageSize` | eth 프로토콜 메시지 상한을 100 MiB에서 **10 MiB**로 낮췄다. 블록 바디를 포함한 과대 메시지를 읽는 단계에서 거부한다 |
+
+- `environment.size`는 `makeEnv`에서 헤더 크기로 시작하고, `commitTransaction`이 tx를 담을 때마다 늘어난다. `environment.copy()`도 이 값을 복사한다. 새 패킹 경로를 추가하면 이 세 곳의 규칙을 그대로 따라야 한다.
+- 생성 쪽 여유분 1,000,000 바이트는 tx를 담은 뒤에 블록에 추가되는 데이터를 위한 것이다 (코드 주석의 "auxiliary data"). 생성 상한을 수신 상한과 같게 맞추면 직접 만든 블록을 피어가 거부할 수 있다.
+- 수신 쪽 검사를 빼면 크기 상한을 넘은 블록이 canonical이 되는 순간 다른 노드가 받아들이지 못해 체인이 영구히 멈춘다.
+- 회귀 테스트: `TestValidateBodyBlockOversized`, `TestCommitTransactionsBlockSizeLimit`, `TestCommitTransactionsSimpleBlockSizeLimit`
+
 ### 수정 시 주의사항
 
 - **etcd 임베디드**는 노드 프로세스 내부에서 실행 — 별도 클러스터 관리 불필요. `wemix/etcdutil.go` 참조
 - **토큰 재진입 금지**: SpinLock 임계 영역 내부에서 etcd 호출은 짧게 (블록 검증 같은 무거운 작업 금지)
 - **토큰 갱신 실패 처리**: TTL 만료 시 다른 노드가 토큰을 가져가도록 fail-fast — 무리한 재시도 금지
-- **`findConsensusBlock`** (`wemix/sync.go:202`)이 멤버 다수가 동의하는 블록 높이를 찾아 동기화 지점 결정
+- **`findConsensusBlock`** (`wemix/sync.go:197`)이 멤버 다수가 동의하는 블록 높이를 찾아 동기화 지점 결정
 
 ---
 
@@ -653,6 +701,10 @@ wemix/spinlock.go: SpinLock — 토큰 임계 영역 보호
 | `acquireToken(ctx, height, ttl)` | 마이닝 토큰 획득 |
 | `releaseTokenSync(...)` | 동기 반환 (블록 확정 시) |
 | `etcdResetWork(token, newWork)` | **토큰 보유 확인 후에만** `wemixWorkKey` 기록 (etcd Txn CAS). 토큰 불일치/부재 시 `ErrInvalidToken` |
+| `etcdGet(key)` | 키 하나만 조회. `WithPrefix`/`WithRange` 없이 호출하므로 결과는 최대 1건이고 `Kvs[0]`을 바로 쓴다. 접두사·범위 조회가 필요하면 이 함수를 늘리지 말고 별도 함수를 만든다 (코드 주석에 명시된 계약) |
+| `etcdAutoJoin()` | 다른 마이너 수에 맞춰 가입 시점을 분산한다. `gap == 0`(피어 없음)이면 `ErrNotFound`로 일찍 반환 |
+
+> **v0.10.15에서 삭제된 미사용 함수** (#194): `etcdWipe`, `etcdStop`, `etcdIsLeader`, `etcdPut2`, `etcdCompact`, `WemixToken.renew`, `WemixToken.lockedPut`, `ttl2`, `admin.go`의 `pendingEmpty`. 호출하던 곳이 없어서 지웠다. 이 이름으로 코드를 찾거나 새 코드에서 호출하지 말 것.
 
 ### 임베디드 etcd 설정
 
@@ -665,7 +717,8 @@ ListenPeerUrls       ← 멤버 간 통신용
 
 ### 수정 시 주의사항
 
-- **`wemix/etcdutil.go.new`** 파일은 빌드 비참여 — 작업 보관용. **운영 코드는 `etcdutil.go`임에 주의**
+- `wemix/etcdutil.go.new` 보관 파일은 v0.10.15에서 삭제됐다. etcd 운영 코드는 `etcdutil.go` 하나뿐이다
+- **`etcdAutoJoin`의 `gap == 0` 가드 유지** (#193): `getMiners`가 빈 목록을 돌려주면 `tt = sz * gap = 0`이 되어 `ct/tt`에서 0 나눗셈 panic이 난다. recover가 없는 고루틴이라 프로세스 전체가 죽는다
 - 클러스터 재구성 시 `etcdReady` 플래그 / `etcdAutoJoinLock` 채널이 race-free하게 동기화되어야 함
 - etcd 임베디드를 비활성화한 단독 모드 빌드는 현재 지원하지 않음 (의존성 깊이 박힘)
 - etcd 데이터 경로의 디스크 용량 부족이 합의 실패의 흔한 원인 — 모니터링 필수
@@ -823,12 +876,17 @@ NCPExit / NCPExitImp        (Pangyo 이후)
 
 ### gwemix governancedeploy 흐름
 
-`cmd/gwemix/governancedeploy.go:66 deployGovernanceContracts(ctx)`:
+`cmd/gwemix/governancedeploy.go:66 deployGovernanceContracts(ctx)` — CLI 등록은 `cmd/gwemix/wemixcmd.go`의 `wemix deploy-governance` 서브커맨드다.
 
 ```
-1. 사용자가 제공한 config (StakingReward, Maintenance, FeeCollector 등) 파싱
-2. EOA 키 로드 → bind.TransactOpts 생성
-3. lockAmount = gov.DefaultInitEnvStorage.STAKING_MIN (기본 락업 금액)
+gwemix wemix deploy-governance [--password <file>] [--url <url>] [--gas <gas>] [--gasprice <gas-price>] \
+    <config-file> <account-file> [lockAmount]
+```
+
+```
+1. 위치 인자 파싱: 2개면 lockAmount = gov.DefaultInitEnvStorage.STAKING_MIN, 3개면 3번째 인자(10진수, 0보다 커야 함)
+2. 사용자가 제공한 config (StakingReward, Maintenance, FeeCollector 등) 파싱
+3. EOA 키 로드 → bind.TransactOpts 생성
 4. deployGovernance(client, opts, lockAmount, configFile)
    ├─ Registry / Staking / BallotStorage / EnvStorage / Gov 프록시 + 구현 배포
    ├─ EnvStorage 초기값 주입 (gov.InitEnvStorage)
@@ -837,12 +895,14 @@ NCPExit / NCPExitImp        (Pangyo 이후)
 5. 최종 Registry/Staking/EnvStorage/BallotStorage/Gov 주소 출력
 ```
 
+> **lockAmount 섀도잉 주의** (v0.10.15, #190): 인자가 3개인 분기에서 `lockAmount, ok := ...`로 쓰면 바깥 `lockAmount`가 가려져 nil인 채로 남고, 이어지는 배포에서 panic이 난다. `var ok bool` 후 `=`로 대입해야 한다.
+
 ### 신규 네트워크 부트스트랩 절차
 
 1. `wemix/scripts/config.json.example` 복사 → 운영용 config 작성 (validator 주소, 보상 풀 주소, 초기 staking 등)
 2. `wemix/scripts/genesis-template.json` 기반으로 alloc/chainConfig 채우기
 3. `gwemix init <genesis.json>` 으로 chaindata 초기화
-4. `gwemix governancedeploy --config <config.json>`으로 거버넌스 컨트랙트 배포
+4. `gwemix wemix deploy-governance <config-file> <account-file> [lockAmount]`로 거버넌스 컨트랙트 배포
 5. 출력된 Registry 주소를 `WemixGenesisFile` 또는 환경변수에 고정
 
 ---
@@ -860,6 +920,9 @@ NCPExit / NCPExitImp        (Pangyo 이후)
 | `getGasLimitAndBaseFee()` | EnvStorageImp | `(gasLimit, baseFeeMaxChangeRate, gasTargetPercentage)` |
 | `getMaxBaseFee()` | EnvStorageImp | baseFee 상한 |
 | `getMaxIdleBlockInterval()` | EnvStorageImp | 마이너 idle 한계 |
+| `MaxBlockSize` | `params/protocol_params.go` | RLP 인코딩 블록 상한 8,388,608 바이트 (EIP-7934, §12) |
+| `MaxTransactionSize` | `params/protocol_params.go` | tx 크기 상한 262,144 바이트 |
+| `maxMessageSize` | `eth/protocols/eth/protocol.go` | eth 프로토콜 메시지 상한 10 MiB (v0.10.14까지 100 MiB) |
 
 ### Staking (`wemix/governance-contract/contracts/Staking.sol`)
 
@@ -901,16 +964,19 @@ NCPExit / NCPExitImp        (Pangyo 이후)
 12. **`StatusEx`의 `NodeName`은 거버넌스 조회로만 결정** — 페이로드 값을 신뢰하면 정족수 위조 가능 (§15)
 13. **RLP `*big.Int` nil 가드는 핸들러 경계에서** — 호출처마다 가드하는 방식으로 되돌리지 말 것 (§15)
 14. **`wemixWorkKey` 기록 전 3중 검증 유지** — 도달성 / 해시·높이 정합 / 높이 역행. 각각 다른 구멍을 막음 (§12, §15)
-15. **`etcdResetWork` 직전에 `renew()` 호출 금지** — 토큰 `Till`이 갱신되어 CAS가 항상 실패 (§12)
-16. **거버넌스 호출은 항상 Registry 경유** — 컨트랙트 주소 하드코딩 금지 (UUPS 업그레이드로 주소 보존, 구현만 변경)
+15. **토큰 획득과 `etcdResetWork` 사이에 `Till` 변경 금지** — CAS가 항상 실패한다. 구 `renew()`는 삭제됐지만 TTL 갱신을 다시 넣을 때도 같은 제약 (§12)
+16. **멈춘 워커는 마이닝 토큰을 잡지 않는다** — `commitWork`의 `isRunning()` 가드를 `AcquireMiningToken` 앞에 유지 (§12)
+17. **블록 크기 상한(EIP-7934) 수신·생성 양쪽 유지** — `ValidateBody`의 `ErrBlockOversized`, 패킹 루프의 `txFitsSize`. 생성 여유분 1,000,000 바이트를 없애지 말 것 (§12)
+18. **`timeIt` 타임스탬프 하한은 `parent.Time()`** — `parent.Number()`와 비교하던 버그로 되돌리지 말 것 (§12)
+19. **거버넌스 호출은 항상 Registry 경유** — 컨트랙트 주소 하드코딩 금지 (UUPS 업그레이드로 주소 보존, 구현만 변경)
 
 ### 운영
-17. **etcd `etcdutil.go.new` 파일은 무시** — 빌드 비참여 (`etcdutil.go`만 운영) (§13)
-18. **`wemix/admin.go`는 43KB 단일 파일** — 함수 단위로 신중하게 수정, 무관한 영역 동시 편집 금지
-19. **wemixminer 함수 변수 주입은 `wemix/admin.go` 초기화 시점에 1회만** — 런타임 재설정 금지
+20. **`etcdAutoJoin`의 `gap == 0` 가드 유지** — 빼면 0 나눗셈 panic으로 프로세스가 죽는다 (§13)
+21. **`wemix/admin.go`는 약 42KB 단일 파일** — 함수 단위로 신중하게 수정, 무관한 영역 동시 편집 금지
+22. **wemixminer 함수 변수 주입은 `wemix/admin.go` 초기화 시점에 1회만** — 런타임 재설정 금지
 
 ### 빌드/배포
-20. **PR 전 로컬 확인** — `make lint && make test-short && make gwemix`
-21. **Go 버전 1.19 고정** — `go.mod` 변경 시 의존성 호환성 확인
-22. **RocksDB 통합은 Linux 빌드에서만 활성** — darwin/Windows 빌드 시 `USE_ROCKSDB=NO` 자동 적용
-23. **`logrot` 동작 변경은 이 저장소가 아님** — `cmd/logrot/main.go`는 wrapper, 본체는 외부 모듈 `github.com/charlanxcc/logrot`
+23. **PR 전 로컬 확인** — `make lint && make test-short && make gwemix`
+24. **Go 버전 1.19 고정** — `go.mod` 변경 시 의존성 호환성 확인
+25. **RocksDB 통합은 Linux 빌드에서만 활성** — darwin/Windows 빌드 시 `USE_ROCKSDB=NO` 자동 적용
+26. **`logrot` 동작 변경은 이 저장소가 아님** — `cmd/logrot/main.go`는 wrapper, 본체는 외부 모듈 `github.com/charlanxcc/logrot`

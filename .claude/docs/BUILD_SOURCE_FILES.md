@@ -5,9 +5,9 @@
 > - 추출 방법: `go list -deps ./cmd/gwemix`, `go list -deps ./cmd/logrot` (Go 의존성 트리 기반)
 > - 빌드 파일 = `GoFiles` + `CgoFiles`, 테스트 파일 = `TestGoFiles` + `XTestGoFiles`
 > - 플랫폼: darwin/arm64 (`USE_ROCKSDB=NO`). Linux/amd64 차이는 §7 참조
-> - 분석 기준일: **2026-07-29**
-> - 기준 브랜치: `dev` (commit `4e0005fbe`, `params/version.go` = **v0.10.14-stable**)
-> - Go 모듈 선언 버전 1.19 (`go.mod`) / 검증에 사용한 툴체인 go1.25.11
+> - 분석 기준일: **2026-10-07**
+> - 기준 브랜치: `dev` (commit `1ceaa1e6a`, `params/version.go` = **v0.10.15-stable**)
+> - Go 모듈 선언 버전 1.19 (`go.mod`) / 검증에 사용한 툴체인 go1.25.12
 
 ---
 
@@ -347,7 +347,7 @@ func main() {
 > - `wemix/bind/backends/` — `wemix_simulated.go`, `options.go` (테스트 전용 시뮬레이션 백엔드)
 > - `wemix/governance-contract/` — Solidity 소스 + `compiler.go` + `solcdownloader/` + `test/`
 > - `wemix/scripts/` — `gwemix.sh`, `config.json.example`, `genesis-template.json` (런타임 자산, tarball에 동봉)
-> - `wemix/etcdutil.go.new` — `.go.new` 확장자라 Go 빌드 대상이 아닌 보관 파일. **운영 코드는 `etcdutil.go`**
+> - (`wemix/etcdutil.go.new` 보관 파일은 v0.10.15에서 삭제됐다)
 
 ---
 
@@ -370,6 +370,8 @@ func main() {
 | `eth/protocols/eth` | `handler_test.go`, `handshake_test.go`, `peer_test.go`, `protocol_test.go` | `wemix_handlers.go`가 얹히는 프로토콜 레이어 |
 | `p2p/rlpx` | `rlpx_oracle_poc_test.go` | RLPx 핸드셰이크 오라클 PoC (업스트림 보안 동기화) |
 | `params` | `config_test.go` | 하드포크 순서/호환성 (`CheckConfigForkOrder`, `CheckCompatible`) |
+| `core` | `block_validator_test.go` | EIP-7934 블록 크기 상한 수신 경로 — `TestValidateBodyBlockOversized` |
+| `miner` | `worker_test.go` | Wemix 블록 생성 경로 — `TestCommitTransactions[Simple]BlockSizeLimit`, `TestTimeItTimestampLowerBound`, `TestSkipMiningTokenAcquisitionWhenWorkerStopped` |
 
 ### 3.2 빌드 의존성 밖에 있는 Wemix 테스트
 
@@ -648,7 +650,7 @@ go-ethereum 원본에 없는 Wemix 전용 패키지 및 파일.
 | `core/state_transition.go` | FeePayer 잔액 차감 |
 | `light/txpool.go` | 라이트 클라이언트 측 Fee Delegation 검증 |
 | `internal/ethapi/api.go` | `SignRawFeeDelegateTransaction` 등 RPC |
-| `miner/worker.go` | wemixminer 함수 변수 경유 보상/서명 주입 |
+| `miner/worker.go` | wemixminer 함수 변수 경유 보상/서명 주입, `commitWork`의 마이닝 토큰 획득 게이트(`isRunning()`), `timeIt` 블록 타임스탬프 결정 |
 
 ---
 
@@ -728,8 +730,8 @@ go-ethereum 원본에 없는 Wemix 전용 패키지 및 파일.
 
 - 외부 의존성(third-party 모듈)은 이 목록에 포함되지 않는다. 전체 외부 의존성은 `go.mod` 참조 (module path: `github.com/ethereum/go-ethereum`, 선언 Go 버전 1.19).
 - `build/ci.go` 자체는 `//go:build none` 태그로 일반 빌드에서 제외되며 `go run`으로만 실행된다. Makefile은 이 파일의 wrapper다.
-- `wemix/governance-contract/`의 Solidity 소스와 `compiler.go`는 `go generate` 또는 `cmd/gwemix governancedeploy` 워크플로우에서만 쓰이고, 일반 `make gwemix` 빌드에는 들어가지 않는다. 단, `wemix/bind/gen_*_abi.go`에 이미 컴파일된 ABI/바이트코드가 임베드되어 있다.
-- `wemix/admin.go`는 약 43KB, `wemix/etcdutil.go`는 약 29KB, `wemix/sync.go`는 약 15KB의 단일 파일이다 — 수정 시 함수 단위로 신중하게 변경하고 무관한 영역 동시 편집을 피한다.
+- `wemix/governance-contract/`의 Solidity 소스와 `compiler.go`는 `go generate` 또는 `gwemix wemix deploy-governance` 워크플로우에서만 쓰이고, 일반 `make gwemix` 빌드에는 들어가지 않는다. 단, `wemix/bind/gen_*_abi.go`에 이미 컴파일된 ABI/바이트코드가 임베드되어 있다.
+- `wemix/admin.go`는 약 42KB, `wemix/etcdutil.go`는 약 26KB, `wemix/sync.go`는 약 14KB의 단일 파일이다 (v0.10.15에서 미사용 함수를 지워 줄었다) — 수정 시 함수 단위로 신중하게 변경하고 무관한 영역 동시 편집을 피한다.
 - `wemix/sync_regression_test.go`(32KB)는 StatusEx 위조·workKey 오염 공격 체인의 **pre-fix 재현 / post-fix 방어**를 쌍으로 검증한다. 관련 코드(`eth/protocols/eth/wemix_handlers.go`, `wemix/sync.go`, `wemix/api/api.go`, `wemix/miner_limit.go`)를 수정하면 반드시 함께 실행할 것.
 
 ### 이 문서 재생성 방법

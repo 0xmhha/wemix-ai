@@ -133,13 +133,15 @@ Gov._memberList[1] = member1
 ### `cmd/gwemix governancedeploy` 흐름
 
 파일: `cmd/gwemix/governancedeploy.go:66 deployGovernanceContracts(ctx)`
+실행: `gwemix wemix deploy-governance [--password <file>] [--url <url>] [--gas <gas>] [--gasprice <gas-price>] <config-file> <account-file> [lockAmount]`
 
 ```
 deployGovernanceContracts(ctx)
   │
   ├─ ctx에서 키 파일·비밀번호·config.js 경로 파싱
   │
-  ├─ lockAmount = gov.DefaultInitEnvStorage.STAKING_MIN
+  ├─ lockAmount = 3번째 인자(10진수, > 0) 또는 생략 시 gov.DefaultInitEnvStorage.STAKING_MIN
+  │     ※ 3인자 분기에서 `:=`로 쓰면 바깥 lockAmount가 가려져 nil panic (v0.10.15 #190에서 수정)
   │
   └─ deployGovernance(client, opts, lockAmount, configFile)
        │
