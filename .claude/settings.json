@@ -36,6 +36,7 @@
       "Bash(go test -short -count=1 ./core/...)",
       "Bash(go test -short -count=1 ./params/...)",
       "Bash(go test -short -count=1 ./miner/...)",
+      "Bash(go test -short -count=1 ./eth/protocols/eth/...)",
       "Bash(go list -deps ./cmd/gwemix/...)",
       "Bash(golangci-lint run *)",
       "Bash(gh pr view *)",
