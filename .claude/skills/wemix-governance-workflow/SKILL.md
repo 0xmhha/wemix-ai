@@ -109,7 +109,9 @@ go run ./compiler.go  # 또는 compile/main.go가 있다면 그것
 ls wemix/governance-contract/contracts/*.bin 2>/dev/null
 ```
 
-**불변식**: solc 버전은 **0.8.14 고정**. `wemix/governance-contract/compiler.go`의 `solcVersion` 상수와 일치해야 한다. 다른 버전 사용 시 바이트코드 해시가 변동되어 제네시스와 어긋난다.
+**불변식**: solc 버전은 **0.8.14 고정**. `wemix/governance-contract/compiler.go`의 `DefaultSolcVersion` 상수와 일치해야 한다. 다른 버전 사용 시 바이트코드 해시가 변동되어 제네시스와 어긋난다.
+
+**예외 — GovImp 바이트코드**: mainnet의 GovImp는 `mock/GovImpLegacy.sol`을 solc 0.8.2로 컴파일한 것이다. `contracts/abigen.go`는 이 산출물을 `CompileWithVersion`으로 만들고 `ReplaceCode`로 GovImp 바인딩에 넣는다(ABI는 `GovImp.sol`). `GovImp.sol`을 고쳐도 바인딩 바이트코드는 바뀌지 않으니, 새 구현을 배포하려면 `abigen.go`의 `govImpSource`/`govImpSolcVersion`부터 바꿔야 한다.
 
 ### Layer 3 — Go 바인딩 재생성 (abigen)
 

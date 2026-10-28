@@ -69,6 +69,9 @@ miner.Start()
         │
         ├─ wemix/etcdutil.go: acquireTokenSync(ctx, height, parentHash, ttl)
         │    → CAS로 토큰 획득 (다른 노드가 이미 잡았거나 work가 parent와 다르면 실패)
+        │    → 획득 직후 defer AbandonMiningToken: 블록 없이 끝나면 토큰 반환
+        │
+        ├─ coinbase = w.etherbase()  (w.mu 잠금 아래에서 한 번 읽음)
         │
         ├─ tx 패킹: commitTransactions / commitTransactionsSimple
         │    → txFitsSize로 블록 크기 상한(EIP-7934) 직전에 멈춤
@@ -89,11 +92,11 @@ miner.Start()
 
 주요 파일:
 - `wemix/admin.go` — wemixAdmin 본체. `distributeRewards`, `signBlock`, `getBlockBuildParameters`, `getWemixNodes`, `NodeNameForPeerID`
-- `wemix/sync.go` — `loadMiningToken`, `findConsensusBlock`, `syncCheck` (workKey 재설정 + 다중 가드)
+- `wemix/sync.go` — `loadMiningToken`, `abandonMiningToken`, `findConsensusBlock`, `syncCheck` (workKey 재설정 + 다중 가드)
 - `wemix/etcdutil.go` — etcd embedded 운영, 토큰 acquire/release, `etcdResetWork` (토큰 보유 확인 CAS)
-- `wemix/miner_limit.go` — `electNextMiner`, 마이너 상태 수집
+- `wemix/miner_limit.go` — `electNextMiner`, 마이너 상태 수집, `getCoinbaseEnodeCache`(노드 수 0이면 캐시하지 않음)
 - `wemix/spinlock.go` — 토큰 임계 영역 보호
-- `miner/worker.go` — `commitWork`(토큰 획득 게이트), `timeIt`(타임스탬프 하한), `txFitsSize`(블록 크기 상한)
+- `miner/worker.go` — `commitWork`(토큰 획득 게이트·반환), `etherbase()`, `timeIt`(타임스탬프 하한), `txFitsSize`(블록 크기 상한)
 - `core/block_validator.go` — `ValidateBody`가 8 MiB 초과 블록을 `ErrBlockOversized`로 거부
 - `wemix/miner/miner.go` — 표준 miner ↔ wemix 함수 변수 IoC (`NodeNameForPeerIDFunc` 등)
 - `consensus/clique/clique.go` — PoA 합의 본체 (Wemix는 위에 admin 레이어)
@@ -103,12 +106,17 @@ miner.Start()
 1. `NodeName`은 `wemixminer.NodeNameForPeerID(peer.ID())` 거버넌스 조회 결과로만 결정 (페이로드 값 신뢰 금지)
 2. RLP에서 생략된 `*big.Int`(`LatestBlockHeight`, `LatestBlockTd`, `RttMs`)의 nil 가드는 **핸들러 경계**에서
 3. `wemixWorkKey` 기록 전 도달성 / 해시·높이 정합 / 높이 역행 3중 검증 + `etcdResetWork` CAS
+4. `getMiners`는 검증자 하나의 응답을 한 번만 센다. 받은 status는 `Clone()` 후 `RttMs`를 쓴다 (`wemix/admin_test.go`)
+
+같은 원칙이 tx 전파에도 있다. `TransactionsEx`의 `From`은 피어 입력이므로 `TxExs2Txs`가 버리고, sender는 서명에서 복구한다 (`eth/protocols/eth/wemix_txex_sender_test.go`).
 
 **블록 생성 경로 불변식** (v0.10.15) — `miner/worker.go`나 `core/block_validator.go`를 건드리면 `miner/worker_test.go`, `core/block_validator_test.go`를 실행할 것:
 
 1. 멈춘 워커(`!isRunning()`)는 `AcquireMiningToken`을 부르지 않는다. 잡은 토큰을 반환할 경로가 없어 Till 만료까지 체인이 멈춘다
 2. 블록 크기 상한 8 MiB(EIP-7934)는 수신(`ValidateBody`)과 생성(`txFitsSize`, 여유분 1,000,000 바이트) 양쪽에 있다. 하드포크 게이트가 없다
 3. `timeIt`의 타임스탬프 하한은 `parent.Time()`이다
+4. 토큰을 잡은 뒤 블록 없이 빠져나가면 `defer`된 `AbandonMiningToken`이 토큰을 돌려준다. 회귀 테스트는 `miner/worker_wemix_mining_abandon_test.go`
+5. coinbase는 `w.etherbase()`로 잠금 아래에서 읽는다. `-race`로 `TestCommitWorkCoinbaseRace`를 돌릴 것
 
 ### 유형 5: 거버넌스 컨트랙트 질문
 
@@ -155,8 +163,9 @@ wemix/governance-contract/contracts/ (Solidity 소스):
   - `internal/ethapi/api.go: SubmitTransaction()`의 중복 검증은 **제거됨** — 되살리지 말 것
 - EVM 실행: `core/vm/evm.go` → `core/vm/interpreter.go` → `core/vm/instructions.go`
 - 트랜잭션 처리: `core/state_processor.go` → `core/state_transition.go`
-- 트랜잭션 풀: `core/tx_pool.go` (Applepie 게이팅 위치)
-- 테스트: `core/types/transaction_test.go` (`TestRecoverFeePayer`, `TestAsMessageFeeDelegation`, `TestSetSenderTxAccessListPreserved`)
+- 트랜잭션 풀: `core/tx_pool.go` (Applepie 게이팅 위치). `demoteUnexecutables`는 수수료 대납자가 못 내는 tx를 뺄 때 함께 빠진 후속 nonce tx를 다시 큐에 넣는다. 판정은 `feePayerUnpayable`
+- P2P 수신: `TxExs2Txs(txs)`는 피어가 보낸 `From`을 버린다. sender 캐시를 피어 값으로 채우던 `trustIt` 인자는 없어졌다
+- 테스트: `core/types/transaction_test.go` (`TestRecoverFeePayer`, `TestAsMessageFeeDelegation`, `TestSetSenderTxAccessListPreserved`), `core/tx_pool_feedelegation_test.go`, `core/types/wemix_txex_test.go`
 
 ### 유형 7: 네트워크 / P2P 질문
 
@@ -178,13 +187,13 @@ wemix/governance-contract/contracts/ (Solidity 소스):
 ### 유형 9: etcd / 멤버십 운영 질문
 
 - 임베디드 etcd 설정: `wemix/etcdutil.go` (`etcdNewConfig`, `etcdIsRunning`, `etcdMemberExists`, `etcdFixCluster`)
-- 마이닝 토큰: `acquireToken`, `acquireTokenSync`, `release`, `releaseTokenSync` (`renew`는 v0.10.15에서 삭제)
+- 마이닝 토큰: `acquireToken`, `acquireTokenSync`, `release`, `releaseTokenSync` (`renew`는 v0.10.15에서 삭제). 블록 없이 반환할 때는 `wemix/sync.go: abandonMiningToken`이 `release`를 부른다. etcd 키가 아직 자기 토큰 값일 때만 지운다
 - **`etcdResetWork(token, newWork)`**: 토큰을 여전히 보유 중일 때만 `wemixWorkKey`를 기록하는 CAS. 실패 시 `ErrInvalidToken`. **획득과 이 호출 사이에 토큰 `Till`을 바꾸면 CAS가 항상 실패**한다 (저장값과 불일치). `wemix/sync.go`의 WARNING 주석이 아직 `renew()`를 언급하지만 함수는 없다
 - `etcdGet(key)`: 키 하나만 조회한다는 계약. 접두사·범위 조회는 별도 함수로
 - `etcdAutoJoin`: 피어가 없으면(`gap == 0`) `ErrNotFound`로 일찍 반환. 0 나눗셈 panic 방지 가드
 - 멤버십 동기화: `wemix/sync.go: findConsensusBlock`, `syncCheck`, `wemix/admin.go: getWemixNodes`
 - 락 프리미티브: `wemix/spinlock.go`
-- 테스트: `wemix/etcd_test.go` (임베디드 etcd 위 `TestEtcdResetWork_*` 5종)
+- 테스트: `wemix/etcd_test.go` (임베디드 etcd 위 `TestEtcdResetWork_*` 5종, `TestAbandonMiningToken_*` 2종)
 
 > v0.10.15에서 `wemix/etcdutil.go.new` 보관 파일과 미사용 함수(`etcdWipe`, `etcdStop`, `etcdIsLeader`, `etcdPut2`, `etcdCompact`, `renew`, `lockedPut`, `ttl2`, `pendingEmpty`)가 삭제됐다. 옛 브랜치나 문서에서 이 이름을 보면 현재 코드에 없는 것이다.
 

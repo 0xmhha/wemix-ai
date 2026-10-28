@@ -5,8 +5,8 @@
 > - 추출 방법: `go list -deps ./cmd/gwemix`, `go list -deps ./cmd/logrot` (Go 의존성 트리 기반)
 > - 빌드 파일 = `GoFiles` + `CgoFiles`, 테스트 파일 = `TestGoFiles` + `XTestGoFiles`
 > - 플랫폼: darwin/arm64 (`USE_ROCKSDB=NO`). Linux/amd64 차이는 §7 참조
-> - 분석 기준일: **2026-10-07**
-> - 기준 브랜치: `dev` (commit `1ceaa1e6a`, `params/version.go` = **v0.10.15-stable**)
+> - 분석 기준일: **2026-10-28**
+> - 기준 브랜치: `dev` (commit `06d095485`, `params/version.go` = **v0.10.15-stable**)
 > - Go 모듈 선언 버전 1.19 (`go.mod`) / 검증에 사용한 툴체인 go1.25.12
 
 ---
@@ -18,7 +18,7 @@
 | 빌드 대상 바이너리 | **`gwemix`**, **`logrot`** |
 | `gwemix` 내부 패키지 (go-ethereum/) | **120개** |
 | `gwemix` 빌드 참여 Go 소스 (darwin/arm64) | **630개** |
-| `gwemix` 의존 패키지에 딸린 테스트 파일 | **302개** (85개 패키지) |
+| `gwemix` 의존 패키지에 딸린 테스트 파일 | **307개** (85개 패키지) |
 | `logrot` 내부 패키지 | **1개** (`cmd/logrot`, 1 파일 — 본체는 외부 모듈) |
 | Wemix 고유 패키지 | **5개** (`wemix/`, `wemix/api`, `wemix/bind`, `wemix/metclient`, `wemix/miner`) + `cmd/gwemix` |
 | Wemix 고유 파일 (기존 패키지 내) | **6종** (§4.2) |
@@ -351,7 +351,7 @@ func main() {
 
 ---
 
-## 3. `gwemix` 의존 패키지의 테스트 코드 (85 패키지, 302 파일)
+## 3. `gwemix` 의존 패키지의 테스트 코드 (85 패키지, 307 파일)
 
 `go list -deps ./cmd/gwemix`가 잡아낸 120개 패키지 중 테스트 파일을 가진 85개 패키지의 목록이다. 테스트 파일 자체는 바이너리에 포함되지 않지만, **`make test` / `make test-short`가 이 파일들을 실행**하므로 빌드 참여 코드를 수정할 때 함께 확인해야 할 대상이다.
 
@@ -360,18 +360,23 @@ func main() {
 | 패키지 | 테스트 파일 | 커버 대상 |
 |--------|------------|-----------|
 | `wemix` | `rewards_test.go` | `distributeRewards` 4-way 분배, 보상 검증, Brioche halving 곡선 — `TestDistributeRewards`, `TestRewardValidation`, `TestBriocheHardFork` |
-| `wemix` | `etcd_test.go` | 임베디드 etcd 위에서 `etcdResetWork` CAS 동작 — `TestEtcdResetWork_{TokenHeld,TokenMismatch,TokenAbsent,ExpiredThenSuperseded,NotReady}` |
+| `wemix` | `etcd_test.go` | 임베디드 etcd 위에서 `etcdResetWork` CAS 동작 — `TestEtcdResetWork_{TokenHeld,TokenMismatch,TokenAbsent,ExpiredThenSuperseded,NotReady}`. 토큰 반환 시 자기 값만 지우는지 — `TestAbandonMiningToken_{DeletesOwnToken,KeepsOtherToken}` |
+| `wemix` | `admin_test.go` | `getMiners`가 검증자당 응답 하나만 세는지 — `TestGetMiners_DuplicateResponses` |
 | `wemix` | `sync_regression_test.go` | StatusEx 위조 / `wemixWorkKey` 오염 회귀 방어 (32KB). `TestRegression_SpoofedStatusExPoisonsWorkKey`, `TestNodeNameRebind_PreventsQuorumForgery`, `TestRegression_NilLatestBlockTdPanicsHandler`, `TestRegression_NilLatestBlockHeightPanicsElectNextMiner`, `TestRegression_StaleConsensusHeightBlocked`, `TestRegression_EndToEndAttackChain` |
 | `wemix/api` | `api_test.go` | `WemixMinerStatus.Clone()` nil-safe 복사 — `TestWemixMinerStatus_Clone_NilSafe`, `..._DeepCopiesBigInts` |
 | `cmd/gwemix` | `governancedeploy_test.go` | 거버넌스 배포 커맨드 |
 | `cmd/gwemix` | `genesis_test.go`, `dao_test.go`, `les_test.go`, `accountcmd_test.go`, `consolecmd_test.go`, `run_test.go`, `version_check_test.go` | CLI/제네시스/콘솔 통합 |
 | `core/types` | `transaction_test.go` | Fee Delegation 서명·조립 — `TestRecoverFeePayer`, `TestAsMessageFeeDelegation`, `TestSetSenderTxAccessListPreserved` |
 | `core/types` | `transaction_signing_test.go` | Sender/FeePayer 서명자 분리 |
-| `eth/protocols/eth` | `handler_test.go`, `handshake_test.go`, `peer_test.go`, `protocol_test.go` | `wemix_handlers.go`가 얹히는 프로토콜 레이어 |
+| `core/types` | `wemix_txex_test.go` | `TxExs2Txs`가 피어가 보낸 `From`을 버리는지 — `TestTxExs2TxsDropsAdvertisedSender` |
+| `core` | `tx_pool_feedelegation_test.go` | Fee Delegation 강등·eviction — `TestFeeDelegationDemoteRequeuesFollowingTxs`, `TestFeeDelegationEvictEmptiedQueue` |
+| `eth/protocols/eth` | `handler_test.go`, `handshake_test.go`, `peer_test.go`, `protocol_test.go` | `wemix_handlers.go`가 얹히는 프로토콜 레이어. `handler_test.go`에 15 MiB 메시지 상한 회귀 `TestLargeReceiptsResponse{66,68}` |
+| `eth/protocols/eth` | `wemix_txex_sender_test.go` | `TransactionsEx` 수신 시 sender를 서명에서 복구하는지 — `TestTransactionsExIgnoresAdvertisedSender` |
 | `p2p/rlpx` | `rlpx_oracle_poc_test.go` | RLPx 핸드셰이크 오라클 PoC (업스트림 보안 동기화) |
 | `params` | `config_test.go` | 하드포크 순서/호환성 (`CheckConfigForkOrder`, `CheckCompatible`) |
 | `core` | `block_validator_test.go` | EIP-7934 블록 크기 상한 수신 경로 — `TestValidateBodyBlockOversized` |
-| `miner` | `worker_test.go` | Wemix 블록 생성 경로 — `TestCommitTransactions[Simple]BlockSizeLimit`, `TestTimeItTimestampLowerBound`, `TestSkipMiningTokenAcquisitionWhenWorkerStopped` |
+| `miner` | `worker_test.go` | Wemix 블록 생성 경로 — `TestCommitTransactions[Simple]BlockSizeLimit`, `TestTimeItTimestampLowerBound`, `TestSkipMiningTokenAcquisitionWhenWorkerStopped`, `TestCommitWorkCoinbaseRace` |
+| `miner` | `worker_wemix_mining_abandon_test.go` | 블록 없이 끝난 `commitWork`가 토큰을 돌려주는지 — `TestCommitWorkGivesBackMiningTokenWithoutBlock` |
 
 ### 3.2 빌드 의존성 밖에 있는 Wemix 테스트
 
@@ -435,17 +440,17 @@ func main() {
 |--------|------|
 | `contracts/checkpointoracle` | `oracle_test.go` |
 
-#### core/ (8 패키지, 54 파일)
+#### core/ (8 패키지, 56 파일)
 
 | 패키지 | 파일 |
 |--------|------|
-| `core` | `bench_test.go`, `block_validator_test.go`, `blockchain_repair_test.go`, `blockchain_sethead_test.go`, `blockchain_snapshot_test.go`, `blockchain_test.go`, `chain_indexer_test.go`, `chain_makers_test.go`, `dao_test.go`, `genesis_test.go`, `headerchain_test.go`, `rlp_test.go`, `state_processor_test.go`, `tx_list_test.go`, `tx_pool_test.go` |
+| `core` | `bench_test.go`, `block_validator_test.go`, `blockchain_repair_test.go`, `blockchain_sethead_test.go`, `blockchain_snapshot_test.go`, `blockchain_test.go`, `chain_indexer_test.go`, `chain_makers_test.go`, `dao_test.go`, `genesis_test.go`, `headerchain_test.go`, `rlp_test.go`, `state_processor_test.go`, `tx_list_test.go`, `tx_pool_feedelegation_test.go`, `tx_pool_test.go` |
 | `core/bloombits` | `generator_test.go`, `matcher_test.go`, `scheduler_test.go` |
 | `core/forkid` | `forkid_test.go` |
 | `core/rawdb` | `accessors_chain_test.go`, `accessors_indexes_test.go`, `chain_iterator_test.go`, `database_test.go`, `freezer_meta_test.go`, `freezer_table_test.go`, `freezer_test.go`, `freezer_utils_test.go`, `key_length_iterator_test.go`, `table_test.go` |
 | `core/state` | `iterator_test.go`, `state_object_test.go`, `state_test.go`, `statedb_test.go`, `sync_test.go`, `trie_prefetcher_test.go` |
 | `core/state/snapshot` | `difflayer_test.go`, `disklayer_test.go`, `generate_test.go`, `holdable_iterator_test.go`, `iterator_test.go`, `snapshot_test.go` |
-| `core/types` | `block_test.go`, `bloom9_test.go`, `hashing_test.go`, `log_test.go`, `receipt_test.go`, `transaction_signing_test.go`, `transaction_test.go`, `types_test.go` |
+| `core/types` | `block_test.go`, `bloom9_test.go`, `hashing_test.go`, `log_test.go`, `receipt_test.go`, `transaction_signing_test.go`, `transaction_test.go`, `types_test.go`, `wemix_txex_test.go` |
 | `core/vm` | `analysis_test.go`, `contracts_test.go`, `gas_table_test.go`, `instructions_test.go`, `interpreter_test.go` |
 
 #### crypto/ (7 패키지, 18 파일)
@@ -460,7 +465,7 @@ func main() {
 | `crypto/secp256k1` | `secp256_test.go` |
 | `crypto/vrf` | `vrf_test.go` |
 
-#### eth/ (11 패키지, 28 파일)
+#### eth/ (11 패키지, 29 파일)
 
 | 패키지 | 파일 |
 |--------|------|
@@ -470,7 +475,7 @@ func main() {
 | `eth/fetcher` | `block_fetcher_test.go`, `tx_fetcher_test.go` |
 | `eth/filters` | `api_test.go`, `bench_test.go`, `filter_system_test.go`, `filter_test.go` |
 | `eth/gasprice` | `feehistory_test.go`, `gasprice_test.go` |
-| `eth/protocols/eth` | `handler_test.go`, `handshake_test.go`, `peer_test.go`, `protocol_test.go` |
+| `eth/protocols/eth` | `handler_test.go`, `handshake_test.go`, `peer_test.go`, `protocol_test.go`, `wemix_txex_sender_test.go` |
 | `eth/protocols/snap` | `range_test.go`, `sort_test.go`, `sync_test.go` |
 | `eth/tracers` | `api_test.go`, `tracers_test.go` |
 | `eth/tracers/js` | `tracer_test.go` |
@@ -545,11 +550,11 @@ func main() {
 | `metrics` | `counter_test.go`, `debug_test.go`, `ewma_test.go`, `gauge_float64_test.go`, `gauge_test.go`, `graphite_test.go`, `histogram_test.go`, `init_test.go`, `json_test.go`, `meter_test.go`, `metrics_test.go`, `opentsdb_test.go`, `registry_test.go`, `resetting_timer_test.go`, `runtime_test.go`, `sample_test.go`, `timer_test.go`, `writer_test.go` |
 | `metrics/prometheus` | `collector_test.go` |
 
-#### miner/ (1 패키지, 3 파일)
+#### miner/ (1 패키지, 4 파일)
 
 | 패키지 | 파일 |
 |--------|------|
-| `miner` | `miner_test.go`, `unconfirmed_test.go`, `worker_test.go` |
+| `miner` | `miner_test.go`, `unconfirmed_test.go`, `worker_test.go`, `worker_wemix_mining_abandon_test.go` |
 
 #### node/ (1 패키지, 6 파일)
 
@@ -604,11 +609,11 @@ func main() {
 |--------|------|
 | `trie` | `database_test.go`, `encoding_test.go`, `iterator_test.go`, `node_test.go`, `proof_test.go`, `secure_trie_test.go`, `stacktrie_test.go`, `sync_test.go`, `trie_test.go`, `util_test.go` |
 
-#### wemix/ (2 패키지, 4 파일)
+#### wemix/ (2 패키지, 5 파일)
 
 | 패키지 | 파일 |
 |--------|------|
-| **`wemix`** | **`etcd_test.go`**, **`rewards_test.go`**, **`sync_regression_test.go`** |
+| **`wemix`** | **`admin_test.go`**, **`etcd_test.go`**, **`rewards_test.go`**, **`sync_regression_test.go`** |
 | **`wemix/api`** | **`api_test.go`** |
 ---
 
@@ -667,9 +672,9 @@ go-ethereum 원본에 없는 Wemix 전용 패키지 및 파일.
 | consensus/ | 5 | 18 | 3 | 7 |
 | console/ | 2 | 3 | 1 | 2 |
 | contracts/ | 2 | 2 | 1 | 1 |
-| core/ | 10 | 124 | 8 | 54 |
+| core/ | 10 | 124 | 8 | 56 |
 | crypto/ | 8 | 40 | 7 | 18 |
-| eth/ | 14 | 71 | 11 | 28 |
+| eth/ | 14 | 71 | 11 | 29 |
 | ethclient/ | 1 | 2 | 1 | 1 |
 | ethdb/ | 5 | 8 | 2 | 2 |
 | ethstats/ | 1 | 1 | 1 | 1 |
@@ -680,7 +685,7 @@ go-ethereum 원본에 없는 Wemix 전용 패키지 및 파일.
 | light/ | 1 | 7 | 1 | 4 |
 | log/ | 1 | 8 | 1 | 1 |
 | metrics/ | 4 | 35 | 2 | 19 |
-| miner/ | 1 | 5 | 1 | 3 |
+| miner/ | 1 | 5 | 1 | 4 |
 | node/ | 1 | 10 | 1 | 6 |
 | p2p/ | 13 | 47 | 12 | 34 |
 | params/ | 1 | 8 | 1 | 1 |
@@ -688,8 +693,8 @@ go-ethereum 원본에 없는 Wemix 전용 패키지 및 파일.
 | rpc/ | 1 | 18 | 1 | 8 |
 | signer/ | 1 | 1 | 1 | 1 |
 | trie/ | 1 | 14 | 1 | 10 |
-| wemix/ | 5 | 17 | 2 | 4 |
-| **합계** | **120** | **630** | **85** | **302** |
+| wemix/ | 5 | 17 | 2 | 5 |
+| **합계** | **120** | **630** | **85** | **307** |
 
 ---
 
@@ -730,8 +735,8 @@ go-ethereum 원본에 없는 Wemix 전용 패키지 및 파일.
 
 - 외부 의존성(third-party 모듈)은 이 목록에 포함되지 않는다. 전체 외부 의존성은 `go.mod` 참조 (module path: `github.com/ethereum/go-ethereum`, 선언 Go 버전 1.19).
 - `build/ci.go` 자체는 `//go:build none` 태그로 일반 빌드에서 제외되며 `go run`으로만 실행된다. Makefile은 이 파일의 wrapper다.
-- `wemix/governance-contract/`의 Solidity 소스와 `compiler.go`는 `go generate` 또는 `gwemix wemix deploy-governance` 워크플로우에서만 쓰이고, 일반 `make gwemix` 빌드에는 들어가지 않는다. 단, `wemix/bind/gen_*_abi.go`에 이미 컴파일된 ABI/바이트코드가 임베드되어 있다.
-- `wemix/admin.go`는 약 42KB, `wemix/etcdutil.go`는 약 26KB, `wemix/sync.go`는 약 14KB의 단일 파일이다 (v0.10.15에서 미사용 함수를 지워 줄었다) — 수정 시 함수 단위로 신중하게 변경하고 무관한 영역 동시 편집을 피한다.
+- `wemix/governance-contract/`의 Solidity 소스와 `compiler.go`는 `go generate` 또는 `gwemix wemix deploy-governance` 워크플로우에서만 쓰이고, 일반 `make gwemix` 빌드에는 들어가지 않는다. 단, `wemix/bind/gen_*_abi.go`에 이미 컴파일된 ABI/바이트코드가 임베드되어 있다. GovImp의 바이트코드만은 mainnet 배포본인 `mock/GovImpLegacy.sol`(solc 0.8.2) 산출물이다.
+- `wemix/admin.go`는 약 42KB, `wemix/etcdutil.go`는 약 26KB, `wemix/sync.go`는 약 15KB의 단일 파일이다 (v0.10.15에서 미사용 함수를 지워 줄었다) — 수정 시 함수 단위로 신중하게 변경하고 무관한 영역 동시 편집을 피한다.
 - `wemix/sync_regression_test.go`(32KB)는 StatusEx 위조·workKey 오염 공격 체인의 **pre-fix 재현 / post-fix 방어**를 쌍으로 검증한다. 관련 코드(`eth/protocols/eth/wemix_handlers.go`, `wemix/sync.go`, `wemix/api/api.go`, `wemix/miner_limit.go`)를 수정하면 반드시 함께 실행할 것.
 
 ### 이 문서 재생성 방법

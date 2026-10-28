@@ -352,6 +352,14 @@ implementation: GovImp v1            upgradeTo(GovImp v2)
 
 두 파일은 **버그를 그대로 보존하는 것이 존재 이유**다. 최신 GovImp에 맞춰 "고치면" 회귀 테스트가 무의미해진다. `TestW1G_LegacyUpgrade_FullLifecycle`이 레거시→신구현 업그레이드 전 과정을 검증한다.
 
+`GovImpLegacy.sol`은 테스트 밖에서도 쓰인다. mainnet에 배포된 GovImp가 바로 이 소스를 solc 0.8.2로 컴파일한 것이다. 그래서 `contracts/abigen.go`는 GovImp 바인딩을 다음 순서로 만든다.
+
+1. `CompileWithVersion("0.8.2", ...)`로 `mock/GovImpLegacy.sol`을 컴파일한다.
+2. 나머지 컨트랙트는 `Compile`(0.8.14)로 컴파일한다.
+3. `ReplaceCode`로 GovImp의 `Code`/`RuntimeCode`만 레거시 산출물로 바꾼다. ABI는 `GovImp.sol` 것을 그대로 둔다. W1G 수정은 내부 로직만 바꿔서 두 ABI가 같다.
+
+결과적으로 `wemix/bind/gen_gov_abi.go`의 GovImp `Bin`은 온체인 바이트코드와 같고, `gwemix wemix deploy-governance`도 이 레거시 구현을 배포한다. W1G 수정본으로 바꾸는 작업은 후속 변경으로 남아 있다. 이 파일을 고치면 회귀 테스트뿐 아니라 바인딩 바이트코드도 달라진다.
+
 ---
 
 ## 7. Hardfork ↔ Governance Interaction
@@ -398,6 +406,7 @@ implementation: GovImp v1            upgradeTo(GovImp v2)
 | `wemix/governance-contract/contracts/TestnetGovImp.sol` | Testnet 전용 GovImp 변형 |
 | `wemix/governance-contract/contracts/mock/GovImpLegacy.sol` | red→green 회귀 픽스처 — **수정 금지** (§6.4) |
 | `wemix/governance-contract/contracts/mock/GovImpPreMarker.sol` | 노드 마커 미설정 상태 픽스처 — **수정 금지** (§6.4) |
-| `wemix/governance-contract/compiler.go` | solc 0.8.14 호출 헬퍼 |
+| `wemix/governance-contract/compiler.go` | solc 호출 헬퍼. `Compile`은 `DefaultSolcVersion`(0.8.14), `CompileWithVersion`은 버전 지정, `ReplaceCode`는 ABI를 두고 바이트코드만 교체 |
+| `wemix/governance-contract/contracts/abigen.go` | 바인딩 생성기. GovImp 바이트코드는 `mock/GovImpLegacy.sol`(0.8.2)에서 가져온다 (§6.4) |
 | `wemix/governance-contract/test/gov_test.go` | 거버넌스 시나리오 + W1G 회귀 테스트 |
 | `wemix/governance-contract/test/gov_bind_test.go` | abigen 바인딩 정합성 |
