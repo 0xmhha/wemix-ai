@@ -19,7 +19,7 @@ make devtools           # 코드 생성 도구 설치 (stringer, gencodec, proto
 ## 프로젝트 구조
 
 - 빌드 참여 파일 + 테스트 코드 목록: `.claude/docs/BUILD_SOURCE_FILES.md` 참조
-  (`gwemix` = 120 패키지 / 630 파일, 테스트 307개 / `logrot` = 1 파일 wrapper)
+  (`gwemix` = 120 패키지 / 630 파일, 테스트 309개 / `logrot` = 1 파일 wrapper)
 - 메인 클라이언트: `cmd/gwemix/` — `cmd/geth`를 가리키는 심볼릭 링크다. git log·diff에는 `cmd/geth/...` 경로로 찍힌다
 - 로그 로테이션: `cmd/logrot/` — 진입점만 있고 본체는 외부 모듈 `github.com/charlanxcc/logrot`
 - 합의/마이닝 토큰: `wemix/` (admin.go, etcdutil.go, sync.go, miner_limit.go, spinlock.go)
@@ -102,11 +102,15 @@ Pangyo → Applepie → **Brioche** (블록 리워드 halving) → **Croissant**
 | 마이닝 토큰 획득 | `worker.commitWork`는 `isRunning()`이 거짓이면 `AcquireMiningToken`을 호출하지 않는다. 블록 빌드와 토큰 반환이 `isRunning()` 뒤에 있어서, 멈춘 워커가 토큰을 잡으면 Till 만료까지 클러스터 전체가 멈춘다 |
 | 마이닝 토큰 반환 | `commitWork`는 토큰을 잡은 직후 `defer`로 `AbandonMiningToken`을 건다. 블록을 봉인하지 못하고 빠져나가는 모든 경로(동기화로 워커 정지, etherbase 없음, 서명·봉인 실패)에서 토큰을 돌려준다. etcd 키는 자기 토큰 값일 때만 지운다 |
 | 워커 coinbase | `commitWork`는 `w.coinbase`를 직접 읽지 않고 `w.etherbase()`로 `w.mu` 잠금 아래에서 한 번 읽는다. `setEtherbase`와 레이스가 난다 |
+| 워커 프리페처 | PoA `commitWork`는 `prepareWork` 직후 `defer work.discard()`를 건다. 이 work는 동기로 봉인되고 `w.current`에 남지 않아서, 빼면 블록마다 subfetcher 고루틴이 샌다 |
 | getMiners 집계 | 한 검증자의 `StatusEx`는 한 번만 센다. 같은 응답을 반복해 `findConsensusBlock` 과반을 혼자 채우는 것을 막는다. 받은 status는 `Clone()` 후 `RttMs`를 쓴다 |
 | TransactionsEx 발신자 | `TxExs2Txs`는 피어가 보낸 `From`을 sender 캐시에 넣지 않는다. sender는 언제나 서명에서 복구한다 |
+| tx 공지 상한 | 피어별 공지가 `maxTxAnnounces`를 넘으면 `ann.hashes[:maxTxAnnounces-used]`로 남은 자리만 받는다. `want-maxTxAnnounces`로 자르던 버그로 되돌리지 말 것. 앞의 `used >= maxTxAnnounces` 검사가 음수 슬라이스를 막는다 |
 | 코인베이스 캐시 | `getCoinbaseEnodeCache`는 거버넌스 노드 수가 0 이하이면 캐시하지 않고 `ErrNotInitialized`를 돌려준다. 빈 목록을 캐시하면 `nextMinerCandidates`에서 0 나눗셈 panic이 난다 |
 | 블록 크기 상한 | RLP 인코딩 블록은 `params.MaxBlockSize`(8 MiB, EIP-7934) 이하. 수신은 `ValidateBody`가 `ErrBlockOversized`로 거부하고, 생성은 `txFitsSize`가 1,000,000 바이트 여유를 두고 tx 패킹을 멈춘다. 하드포크 게이트 없이 항상 적용된다 |
 | 블록 타임스탬프 하한 | `worker.timeIt`의 하한은 `parent.Time()`이다. `parent.Number()`와 비교하던 버그가 v0.10.15에서 고쳐졌으니 되돌리지 말 것 |
+| RPC 가스 상한 | `RPCGasCap` 기본값은 `defaultRPCGasCap`(105,000,000)이다. 0(무제한)으로 되돌리지 말 것. 블록 가스 한도 아래로 내리면 `eth_estimateGas`가 실패한다. 거버넌스가 `blockGasLimit`을 올리면 같은 릴리스에서 이 값과 테스트의 `wemixBlockGasLimit`을 함께 올린다 |
+| RocksDB cgo 경계 | `rdbBatch.Write`의 `runtime.KeepAlive(b)`와 `RDBIterator.Next`의 `rocksdb_iter_valid` 검사를 빼지 말 것. 둘 중 하나라도 빠지면 노드가 죽는다. finalizer의 5초 지연은 대책이 아니다 |
 | etcd 자동 가입 | `etcdAutoJoin`은 `gap == 0`(피어 없음)이면 `ErrNotFound`로 일찍 반환한다. 이 가드가 없으면 `ct/tt`에서 0 나눗셈 panic이 나고, recover 없는 고루틴이라 프로세스가 죽는다 |
 | FeePayer 검증 | `types.RecoverFeePayer` 단일 진입점. tx **타입** 기준 분기(FeePayer nil 여부 아님). RPC 레이어 중복 검증 부활 금지 |
 | AccessList 복사 | `SetSenderTx`는 `make` 후 `copy` — 사전 할당 없으면 전부 유실 |
@@ -119,6 +123,8 @@ Pangyo → Applepie → **Brioche** (블록 리워드 halving) → **Croissant**
 `wemix/admin_test.go`, `core/types/transaction_test.go`, `core/types/wemix_txex_test.go`,
 `core/tx_pool_feedelegation_test.go`, `core/block_validator_test.go`, `miner/worker_test.go`,
 `miner/worker_wemix_mining_abandon_test.go`, `eth/protocols/eth/wemix_txex_sender_test.go`,
+`eth/ethconfig/config_rpcgascap_test.go`, `eth/fetcher/tx_fetcher_cap_test.go`,
+`ethdb/rocksdb/rocksdb_iterator_next_test.go` (`-tags rocksdb` 필요, CI에서 돌지 않음),
 `wemix/governance-contract/test/gov_test.go`
 
 ## 코드 컨벤션

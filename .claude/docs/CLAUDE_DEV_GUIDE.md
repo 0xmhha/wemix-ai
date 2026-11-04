@@ -78,6 +78,14 @@ USE_ROCKSDB = YES   → rocksdb 디렉토리를 정적 빌드 (Linux 기본)
 
 RocksDB 모드에서는 `-tags rocksdb`로 빌드되어 `ethdb/rocksdb/rocksdb.go`가 활성화된다.
 
+### RocksDB cgo 경계 (#217, #218)
+
+`ethdb/rocksdb/rocksdb.go`는 C 객체를 Go에서 직접 다룬다. Go GC와 C 호출의 수명이 어긋나면 노드가 SIGSEGV로 죽는다.
+
+- **배치 수명** (#218): `rdbBatch.Write`는 `C.rocksdb_write`가 끝날 때까지 `runtime.KeepAlive(b)`로 배치를 붙잡는다. 호출 뒤에 `b`를 쓰는 코드가 없으면 GC가 C 호출 중에 `b`를 거둘 수 있다. finalizer는 5초 뒤에 C 배치를 해제하므로, 쓰기 지연(write stall)으로 호출이 그보다 길어지면 해제된 메모리를 읽는다. `rdbBatchFinalizer`의 5초 지연은 대책이 아니다.
+- **소진된 이터레이터** (#217): `RDBIterator.Next`는 `rocksdb_iter_next` 전에 `rocksdb_iter_valid`를 확인한다. 소진된 이터레이터에서 `rocksdb_iter_next`는 미정의 동작이다. snapshot generator가 `removeStorageBefore` 경로로 끝을 지나 `Next`를 불러 새 RocksDB 노드가 시작 중에 죽었다. leveldb, memorydb처럼 계속 `false`를 돌려준다.
+- **테스트 한계**: `TestRDBIteratorNextPastEnd`는 `rocksdb` 태그가 있어야 컴파일된다. `build/ci.go`의 `doTest`에는 태그 인자가 없어서 `make test`와 CI는 `ethdb/rocksdb` 테스트를 돌리지 않는다. Linux에서 `make rocksdb` 후 `CGO_CFLAGS`, `CGO_LDFLAGS`를 `Makefile`의 `gwemix` 타겟처럼 맞추고 `go test -tags rocksdb ./ethdb/rocksdb/`로 직접 돌려야 한다. `KeepAlive` 수정에는 회귀 테스트가 없다.
+
 ### 빌드 출력 위치
 
 ```
@@ -257,8 +265,10 @@ Wemix 고유 코드 (수정 시 필수 실행):
 | `core/types/wemix_txex_test.go`, `eth/protocols/eth/wemix_txex_sender_test.go` | `TransactionsEx` sender를 서명에서 복구 — `TestTxExs2TxsDropsAdvertisedSender`, `TestTransactionsExIgnoresAdvertisedSender` (§15) |
 | `eth/protocols/eth/handler_test.go` | 15 MiB 메시지 상한에서 큰 receipts 응답 수용 — `TestLargeReceiptsResponse{66,68}` (§12) |
 | `core/block_validator_test.go` | EIP-7934 블록 크기 상한 수신 경로 — `TestValidateBodyBlockOversized` (§12) |
-| `miner/worker_test.go` | 블록 크기 상한 생성 경로 `TestCommitTransactions[Simple]BlockSizeLimit`, 타임스탬프 하한 `TestTimeItTimestampLowerBound`, 멈춘 워커의 토큰 획득 생략 `TestSkipMiningTokenAcquisitionWhenWorkerStopped`, coinbase 레이스 `TestCommitWorkCoinbaseRace` (§12) |
+| `miner/worker_test.go` | 블록 크기 상한 생성 경로 `TestCommitTransactions[Simple]BlockSizeLimit`, 타임스탬프 하한 `TestTimeItTimestampLowerBound`, 멈춘 워커의 토큰 획득 생략 `TestSkipMiningTokenAcquisitionWhenWorkerStopped`, coinbase 레이스 `TestCommitWorkCoinbaseRace`, 프리페처 누수 `TestCommitWorkPrefetcherCleanup` (§12) |
 | `miner/worker_wemix_mining_abandon_test.go` | 블록 없이 끝난 `commitWork`의 토큰 반환 — `TestCommitWorkGivesBackMiningTokenWithoutBlock` (§12) |
+| `eth/ethconfig/config_rpcgascap_test.go` | `RPCGasCap` 기본값 하한 `TestDefaultRPCGasCap` (§18) |
+| `eth/fetcher/tx_fetcher_cap_test.go` | 피어별 공지 상한 자르기 `TestTransactionFetcherAnnounceCapTruncation` (§18) |
 | `cmd/gwemix/*_test.go` | CLI / 제네시스 / `governancedeploy` 검증 (8개) |
 | `params/config_test.go` | 하드포크 순서·호환성 |
 
@@ -267,12 +277,13 @@ Wemix 고유 코드 (수정 시 필수 실행):
 - `wemix/bind/backends/wemix_simulated_test.go` — 거버넌스 시뮬레이션 백엔드
 - `wemix/governance-contract/test/gov_test.go` — GovImp 거버넌스 시나리오. `TestGov`, `TestGov_IndexCorruptionAfterRemoveMember`, `TestW1G01`~`TestW1G04` 계열(CertiK W1G 대응), `TestW1G_LegacyUpgrade_FullLifecycle`
 - `wemix/governance-contract/test/gov_bind_test.go` — abigen 바인딩 정합성
+- `ethdb/rocksdb/rocksdb_iterator_next_test.go`, `rocksdb_test.go` — `rocksdb` 태그 전용. CI에서 돌지 않는다 (§2)
 
 > **red→green 픽스처**: `wemix/governance-contract/contracts/mock/GovImpLegacy.sol`, `GovImpPreMarker.sol`은 **취약했던 시점의 구현을 그대로 보존한 테스트 픽스처**다. 최신 GovImp에 맞춰 "고치면" 회귀 테스트가 무의미해지므로 수정 금지.
 
 geth 원본 테스트 중 자주 걸리는 것: `core/blockchain_test.go`, `core/state_processor_test.go`, `core/tx_pool_test.go`, `eth/protocols/eth/handler_test.go`.
 
-전체 목록: `.claude/docs/BUILD_SOURCE_FILES.md` §3 (85개 패키지 / 307개 테스트 파일).
+전체 목록: `.claude/docs/BUILD_SOURCE_FILES.md` §3 (86개 패키지 / 309개 테스트 파일).
 
 ### CI 분기
 
@@ -655,6 +666,14 @@ wemix/spinlock.go: SpinLock — 토큰 임계 영역 보호
 
 `setEtherbase`는 `w.mu` 아래에서 `w.coinbase`를 쓰는데 `commitWork`는 잠금 없이 읽었다. `miner_setEtherbase`, `miner_start`, wemixAdmin이 주기적으로 coinbase를 다시 설정하는 경로가 블록 빌드와 겹치면 레이스가 났다. 지금은 `w.etherbase()`가 `RLock` 아래에서 값을 복사하고, `commitWork`는 그 값을 한 번만 읽어 계속 쓴다. 회귀 테스트 `TestCommitWorkCoinbaseRace`는 `-race`로 돌려야 의미가 있다.
 
+### 워커 프리페처 정리 — PoA work는 `commitWork`가 버린다 (#213)
+
+`makeEnv`는 `state.StartPrefetcher("miner")`로 trie 프리페처를 켠다. PoW 경로는 `w.current`를 교체할 때 이전 work를 `discard`한다. PoA 경로는 `commitEx`로 동기 봉인하고 `w.current`에 저장하지 않아서 아무도 프리페처를 멈추지 않았다. 스냅샷이 켜진 노드에서 블록마다 subfetcher 고루틴이 샜다.
+
+- `commitWork`의 `!IsPoW()` 분기 첫 줄에 `defer work.discard()`가 있다. coinbase 조회 실패로 일찍 끝나는 경로도 함께 정리된다.
+- 두 개로 나뉘어 있던 `!IsPoW()` 블록은 이때 하나로 합쳐졌다.
+- 회귀 테스트: `TestCommitWorkPrefetcherCleanup`. `SnapshotLimit`을 켜야 프리페처가 돌기 때문에 `newTestWorkerBackendWithCache`로 캐시 설정을 넘긴다.
+
 ### `syncCheck` — stale work 덮어쓰기 방지 (`wemix/sync.go:260`)
 
 노드가 `SyncIdleThreshold` 동안 진전이 없으면 `syncCheck`가 `wemixWorkKey`를 재설정한다. 이 경로는 잘못 쓰면 **클러스터 전체의 마이닝 타깃을 오염**시키므로 여러 겹의 가드가 걸려 있다. 순서대로:
@@ -965,6 +984,10 @@ gwemix wemix deploy-governance [--password <file>] [--url <url>] [--gas <gas>] [
 4. `gwemix wemix deploy-governance <config-file> <account-file> [lockAmount]`로 거버넌스 컨트랙트 배포
 5. 출력된 Registry 주소를 `WemixGenesisFile` 또는 환경변수에 고정
 
+### 체인 가져오기와 제네시스 블록 (#208)
+
+`admin_importChain`(`eth/api.go`)은 파일에서 읽은 블록 중 번호 0을 건너뛴다. 제네시스는 이미 DB에 있고 부모가 없어서 `InsertChain`에 넘기면 unknown ancestor로 실패한다. `gwemix import`(`cmd/utils/cmd.go: ImportChain`)에는 같은 처리가 원래 있었다. go-ethereum#27956을 백포트한 수정이다.
+
 ---
 
 ## 18. 주요 설정값 참조
@@ -983,6 +1006,16 @@ gwemix wemix deploy-governance [--password <file>] [--url <url>] [--gas <gas>] [
 | `MaxBlockSize` | `params/protocol_params.go` | RLP 인코딩 블록 상한 8,388,608 바이트 (EIP-7934, §12) |
 | `MaxTransactionSize` | `params/protocol_params.go` | tx 크기 상한 262,144 바이트 |
 | `maxMessageSize` | `eth/protocols/eth/protocol.go` | eth 프로토콜 메시지 상한 15 MiB (v0.10.14까지 100 MiB, v0.10.15 #196에서 10 MiB, #198에서 15 MiB). 블록 가스 한도를 올리면 다시 계산 (§12) |
+| `defaultRPCGasCap` | `eth/ethconfig/config.go` | `RPCGasCap` 기본값 105,000,000. `--rpc.gascap` 기본값이기도 하다. 아래 "RPC 가스 상한" 참조 |
+| `maxTxAnnounces` | `eth/fetcher/tx_fetcher.go` | 피어별 tx 공지 상한 1,500,000 (geth 기본값보다 크다). 넘으면 `maxTxAnnounces-used`만큼만 받는다 (#216, go-ethereum `e9e12a97`) |
+
+### RPC 가스 상한 (#215)
+
+`RPCGasCap`의 기본값은 0(무제한)이었다. 이제 제네시스 `gasLimit`과 같은 105,000,000이다. 호출 한 번이 쓰는 자원에 상한을 두면서, 블록에 들어가는 tx는 계속 호출하고 추정할 수 있게 하는 값이다.
+
+- **거버넌스와 묶인 값**: 블록 가스 한도는 EnvStorage `blockGasLimit`이라 체인에서 바뀌지만 이 상한은 빌드 시점에 고정된다. 거버넌스가 한도를 올리면 같은 릴리스에서 `defaultRPCGasCap`과 테스트의 `wemixBlockGasLimit`을 함께 올린다. 그러지 않으면 블록에 들어가는 tx도 `eth_estimateGas`에서 실패한다.
+- **내부 호출도 받는다**: wemixAdmin은 `stack.Attach()`로 자기 RPC에 붙어 거버넌스를 조회한다. 가스를 지정하지 않은 호출은 `ToMessage`에서 `RPCGasCap`을 가스로 쓰므로, 운영자가 `--rpc.gascap`을 낮게 주면 내부 조회에도 그대로 걸린다.
+- **0은 명시적 선택**: 플래그나 설정 파일로 0을 준 경우에만 무제한이 된다. 이때 `SetEthConfig`는 RPC 전송 방식과 상관없이 경고 로그를 남긴다.
 
 ### Staking (`wemix/governance-contract/contracts/Staking.sol`)
 
@@ -1031,19 +1064,23 @@ gwemix wemix deploy-governance [--password <file>] [--url <url>] [--gas <gas>] [
 19. **멈춘 워커는 마이닝 토큰을 잡지 않는다** — `commitWork`의 `isRunning()` 가드를 `AcquireMiningToken` 앞에 유지 (§12)
 20. **토큰을 잡은 뒤 블록 없이 끝나면 `AbandonMiningToken`으로 돌려준다** — `commitWork`의 `defer`를 빼지 말 것 (§12)
 21. **워커 coinbase는 `w.etherbase()`로 읽는다** — `w.coinbase` 직접 읽기는 레이스 (§12)
-22. **블록 크기 상한(EIP-7934) 수신·생성 양쪽 유지** — `ValidateBody`의 `ErrBlockOversized`, 패킹 루프의 `txFitsSize`. 생성 여유분 1,000,000 바이트를 없애지 말 것 (§12)
-23. **`timeIt` 타임스탬프 하한은 `parent.Time()`** — `parent.Number()`와 비교하던 버그로 되돌리지 말 것 (§12)
-24. **eth 메시지 상한 15 MiB는 블록 가스 한도에 묶여 있다** — 가스 한도를 올리면 receipts 응답 크기를 다시 계산 (§12)
-25. **거버넌스 호출은 항상 Registry 경유** — 컨트랙트 주소 하드코딩 금지 (UUPS 업그레이드로 주소 보존, 구현만 변경)
+22. **PoA `commitWork`의 `defer work.discard()`를 빼지 말 것** — 없으면 블록마다 프리페처 고루틴이 샌다 (§12)
+23. **블록 크기 상한(EIP-7934) 수신·생성 양쪽 유지** — `ValidateBody`의 `ErrBlockOversized`, 패킹 루프의 `txFitsSize`. 생성 여유분 1,000,000 바이트를 없애지 말 것 (§12)
+24. **`timeIt` 타임스탬프 하한은 `parent.Time()`** — `parent.Number()`와 비교하던 버그로 되돌리지 말 것 (§12)
+25. **eth 메시지 상한 15 MiB는 블록 가스 한도에 묶여 있다** — 가스 한도를 올리면 receipts 응답 크기를 다시 계산 (§12)
+26. **`defaultRPCGasCap`은 블록 가스 한도와 함께 올린다** — 0으로 되돌리거나 한도 아래로 내리지 말 것 (§18)
+27. **tx 공지 상한은 남은 자리만큼 자른다** — `ann.hashes[:maxTxAnnounces-used]` (§18)
+28. **거버넌스 호출은 항상 Registry 경유** — 컨트랙트 주소 하드코딩 금지 (UUPS 업그레이드로 주소 보존, 구현만 변경)
 
 ### 운영
-26. **`etcdAutoJoin`의 `gap == 0` 가드 유지** — 빼면 0 나눗셈 panic으로 프로세스가 죽는다 (§13)
-27. **빈 거버넌스 노드 목록을 코인베이스 캐시에 넣지 않는다** — `getCoinbaseEnodeCache`의 `count.Sign() <= 0` 가드 유지 (§12)
-28. **`wemix/admin.go`는 약 42KB 단일 파일** — 함수 단위로 신중하게 수정, 무관한 영역 동시 편집 금지
-29. **wemixminer 함수 변수 주입은 `wemix/admin.go` 초기화 시점에 1회만** — 런타임 재설정 금지
+29. **`etcdAutoJoin`의 `gap == 0` 가드 유지** — 빼면 0 나눗셈 panic으로 프로세스가 죽는다 (§13)
+30. **빈 거버넌스 노드 목록을 코인베이스 캐시에 넣지 않는다** — `getCoinbaseEnodeCache`의 `count.Sign() <= 0` 가드 유지 (§12)
+31. **`wemix/admin.go`는 약 42KB 단일 파일** — 함수 단위로 신중하게 수정, 무관한 영역 동시 편집 금지
+32. **wemixminer 함수 변수 주입은 `wemix/admin.go` 초기화 시점에 1회만** — 런타임 재설정 금지
 
 ### 빌드/배포
-30. **PR 전 로컬 확인** — `make lint && make test-short && make gwemix`
-31. **Go 버전 1.19 고정** — `go.mod` 변경 시 의존성 호환성 확인
-32. **RocksDB 통합은 Linux 빌드에서만 활성** — darwin/Windows 빌드 시 `USE_ROCKSDB=NO` 자동 적용
-33. **`logrot` 동작 변경은 이 저장소가 아님** — `cmd/logrot/main.go`는 wrapper, 본체는 외부 모듈 `github.com/charlanxcc/logrot`
+33. **PR 전 로컬 확인** — `make lint && make test-short && make gwemix`
+34. **Go 버전 1.19 고정** — `go.mod` 변경 시 의존성 호환성 확인
+35. **RocksDB 통합은 Linux 빌드에서만 활성** — darwin/Windows 빌드 시 `USE_ROCKSDB=NO` 자동 적용
+36. **RocksDB `KeepAlive`와 `Next`의 유효성 검사를 빼지 말 것** — 이 패키지 테스트는 CI에서 돌지 않으니 Linux에서 직접 돌린다 (§2)
+37. **`logrot` 동작 변경은 이 저장소가 아님** — `cmd/logrot/main.go`는 wrapper, 본체는 외부 모듈 `github.com/charlanxcc/logrot`

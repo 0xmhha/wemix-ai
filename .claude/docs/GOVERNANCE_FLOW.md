@@ -343,6 +343,8 @@ implementation: GovImp v1            upgradeTo(GovImp v2)
 
 외부 revert 메시지와 이벤트 문자열은 변경되지 않았다 — 운영 도구 호환성 유지를 위한 의도적 제약이다.
 
+외부 감사 보고서 원본은 `wemix/governance-contract/audit/`에 PDF 6건으로 있다 (#214). W1G-01~04의 원문은 `WemixMainnet-Governance-GovImp__final-20260609T011921Z.pdf`다. 바이너리에 들어가지 않는다.
+
 ### 6.4 red→green 픽스처 (수정 금지)
 
 | 파일 | 역할 |
