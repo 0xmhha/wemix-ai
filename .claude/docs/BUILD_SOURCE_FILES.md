@@ -5,8 +5,8 @@
 > - 추출 방법: `go list -deps ./cmd/gwemix`, `go list -deps ./cmd/logrot` (Go 의존성 트리 기반)
 > - 빌드 파일 = `GoFiles` + `CgoFiles`, 테스트 파일 = `TestGoFiles` + `XTestGoFiles`
 > - 플랫폼: darwin/arm64 (`USE_ROCKSDB=NO`). Linux/amd64 차이는 §7 참조
-> - 분석 기준일: **2026-10-28**
-> - 기준 브랜치: `dev` (commit `06d095485`, `params/version.go` = **v0.10.15-stable**)
+> - 분석 기준일: **2026-11-05**
+> - 기준 브랜치: `dev` (commit `b77527a0f`, `params/version.go` = **v0.10.15-stable**)
 > - Go 모듈 선언 버전 1.19 (`go.mod`) / 검증에 사용한 툴체인 go1.25.12
 
 ---
@@ -18,7 +18,7 @@
 | 빌드 대상 바이너리 | **`gwemix`**, **`logrot`** |
 | `gwemix` 내부 패키지 (go-ethereum/) | **120개** |
 | `gwemix` 빌드 참여 Go 소스 (darwin/arm64) | **630개** |
-| `gwemix` 의존 패키지에 딸린 테스트 파일 | **307개** (85개 패키지) |
+| `gwemix` 의존 패키지에 딸린 테스트 파일 | **309개** (86개 패키지) |
 | `logrot` 내부 패키지 | **1개** (`cmd/logrot`, 1 파일 — 본체는 외부 모듈) |
 | Wemix 고유 패키지 | **5개** (`wemix/`, `wemix/api`, `wemix/bind`, `wemix/metclient`, `wemix/miner`) + `cmd/gwemix` |
 | Wemix 고유 파일 (기존 패키지 내) | **6종** (§4.2) |
@@ -345,15 +345,15 @@ func main() {
 
 > **빌드에 포함되지 않는 wemix 하위 디렉토리** (존재해도 바이너리에 들어가지 않음):
 > - `wemix/bind/backends/` — `wemix_simulated.go`, `options.go` (테스트 전용 시뮬레이션 백엔드)
-> - `wemix/governance-contract/` — Solidity 소스 + `compiler.go` + `solcdownloader/` + `test/`
+> - `wemix/governance-contract/` — Solidity 소스 + `compiler.go` + `solcdownloader/` + `test/` + `audit/`(외부 감사 보고서 PDF 6건)
 > - `wemix/scripts/` — `gwemix.sh`, `config.json.example`, `genesis-template.json` (런타임 자산, tarball에 동봉)
 > - (`wemix/etcdutil.go.new` 보관 파일은 v0.10.15에서 삭제됐다)
 
 ---
 
-## 3. `gwemix` 의존 패키지의 테스트 코드 (85 패키지, 307 파일)
+## 3. `gwemix` 의존 패키지의 테스트 코드 (86 패키지, 309 파일)
 
-`go list -deps ./cmd/gwemix`가 잡아낸 120개 패키지 중 테스트 파일을 가진 85개 패키지의 목록이다. 테스트 파일 자체는 바이너리에 포함되지 않지만, **`make test` / `make test-short`가 이 파일들을 실행**하므로 빌드 참여 코드를 수정할 때 함께 확인해야 할 대상이다.
+`go list -deps ./cmd/gwemix`가 잡아낸 120개 패키지 중 테스트 파일을 가진 86개 패키지의 목록이다. 테스트 파일 자체는 바이너리에 포함되지 않지만, **`make test` / `make test-short`가 이 파일들을 실행**하므로 빌드 참여 코드를 수정할 때 함께 확인해야 할 대상이다.
 
 ### 3.1 Wemix 고유 코드의 테스트 (수정 시 필수 확인)
 
@@ -375,8 +375,10 @@ func main() {
 | `p2p/rlpx` | `rlpx_oracle_poc_test.go` | RLPx 핸드셰이크 오라클 PoC (업스트림 보안 동기화) |
 | `params` | `config_test.go` | 하드포크 순서/호환성 (`CheckConfigForkOrder`, `CheckCompatible`) |
 | `core` | `block_validator_test.go` | EIP-7934 블록 크기 상한 수신 경로 — `TestValidateBodyBlockOversized` |
-| `miner` | `worker_test.go` | Wemix 블록 생성 경로 — `TestCommitTransactions[Simple]BlockSizeLimit`, `TestTimeItTimestampLowerBound`, `TestSkipMiningTokenAcquisitionWhenWorkerStopped`, `TestCommitWorkCoinbaseRace` |
+| `miner` | `worker_test.go` | Wemix 블록 생성 경로 — `TestCommitTransactions[Simple]BlockSizeLimit`, `TestTimeItTimestampLowerBound`, `TestSkipMiningTokenAcquisitionWhenWorkerStopped`, `TestCommitWorkCoinbaseRace`, `TestCommitWorkPrefetcherCleanup` |
 | `miner` | `worker_wemix_mining_abandon_test.go` | 블록 없이 끝난 `commitWork`가 토큰을 돌려주는지 — `TestCommitWorkGivesBackMiningTokenWithoutBlock` |
+| `eth/ethconfig` | `config_rpcgascap_test.go` | `RPCGasCap` 기본값이 0이 아니고 블록 가스 한도 아래로 내려가지 않는지 — `TestDefaultRPCGasCap` |
+| `eth/fetcher` | `tx_fetcher_cap_test.go` | 피어별 공지 상한을 넘을 때 남은 자리만 받는지 — `TestTransactionFetcherAnnounceCapTruncation`. 기존 테스트는 상한에 닿지 않아 이 분기를 타지 않았다 |
 
 ### 3.2 빌드 의존성 밖에 있는 Wemix 테스트
 
@@ -385,6 +387,7 @@ func main() {
 | 위치 | 파일 | 내용 |
 |------|------|------|
 | `wemix/bind/backends/` | `wemix_simulated_test.go` | 거버넌스 컨트랙트 시뮬레이션 백엔드 |
+| `ethdb/rocksdb/` | `rocksdb_test.go`, `rocksdb_iterator_next_test.go` | `rocksdb` 빌드 태그 전용. darwin 집계에 잡히지 않고 `make test`와 CI에서도 돌지 않는다. 소진된 이터레이터 회귀는 `TestRDBIteratorNextPastEnd` |
 | `wemix/governance-contract/test/` | `gov_test.go` | GovImp 거버넌스 시나리오 — 멤버 추가/제거, 투표, 실행, 레거시 업그레이드. `TestGov`, `TestGov_IndexCorruptionAfterRemoveMember`, `TestW1G01`~`TestW1G04` 계열(CertiK W1G 대응), `TestW1G_LegacyUpgrade_FullLifecycle` |
 | `wemix/governance-contract/test/` | `gov_bind_test.go` | abigen 바인딩 정합성 |
 | `wemix/governance-contract/contracts/mock/` | `GovImpLegacy.sol`, `GovImpPreMarker.sol` | red→green 회귀 검증용 구(舊) 구현 픽스처. 수정 금지 — 취약했던 시점의 동작을 그대로 보존해야 테스트가 성립한다 |
@@ -465,14 +468,15 @@ func main() {
 | `crypto/secp256k1` | `secp256_test.go` |
 | `crypto/vrf` | `vrf_test.go` |
 
-#### eth/ (11 패키지, 29 파일)
+#### eth/ (12 패키지, 31 파일)
 
 | 패키지 | 파일 |
 |--------|------|
 | `eth` | `api_test.go`, `handler_eth_test.go`, `handler_test.go`, `sync_test.go` |
 | `eth/catalyst` | `api_test.go` |
 | `eth/downloader` | `downloader_test.go`, `queue_test.go`, `skeleton_test.go`, `testchain_test.go` |
-| `eth/fetcher` | `block_fetcher_test.go`, `tx_fetcher_test.go` |
+| `eth/ethconfig` | `config_rpcgascap_test.go` |
+| `eth/fetcher` | `block_fetcher_test.go`, `tx_fetcher_cap_test.go`, `tx_fetcher_test.go` |
 | `eth/filters` | `api_test.go`, `bench_test.go`, `filter_system_test.go`, `filter_test.go` |
 | `eth/gasprice` | `feehistory_test.go`, `gasprice_test.go` |
 | `eth/protocols/eth` | `handler_test.go`, `handshake_test.go`, `peer_test.go`, `protocol_test.go`, `wemix_txex_sender_test.go` |
@@ -674,7 +678,7 @@ go-ethereum 원본에 없는 Wemix 전용 패키지 및 파일.
 | contracts/ | 2 | 2 | 1 | 1 |
 | core/ | 10 | 124 | 8 | 56 |
 | crypto/ | 8 | 40 | 7 | 18 |
-| eth/ | 14 | 71 | 11 | 29 |
+| eth/ | 14 | 71 | 12 | 31 |
 | ethclient/ | 1 | 2 | 1 | 1 |
 | ethdb/ | 5 | 8 | 2 | 2 |
 | ethstats/ | 1 | 1 | 1 | 1 |
@@ -694,7 +698,7 @@ go-ethereum 원본에 없는 Wemix 전용 패키지 및 파일.
 | signer/ | 1 | 1 | 1 | 1 |
 | trie/ | 1 | 14 | 1 | 10 |
 | wemix/ | 5 | 17 | 2 | 5 |
-| **합계** | **120** | **630** | **85** | **307** |
+| **합계** | **120** | **630** | **86** | **309** |
 
 ---
 

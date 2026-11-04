@@ -7,7 +7,7 @@ Claude Code configuration package for the [go-wemix](https://github.com/wemixarc
 
 When installed into the go-wemix project root, Claude Code gains accurate understanding of the codebase — distinguishing Wemix-specific code from geth, governance contracts from Solidity sources, etcd-based mining-token logic, the Pangyo → Applepie → Brioche hardfork chain, and the security invariants that must not be regressed.
 
-> Tracking go-wemix `dev` @ `06d095485` (**v0.10.15-stable**), verified 2026-10-28.
+> Tracking go-wemix `dev` @ `b77527a0f` (**v0.10.15-stable**), verified 2026-11-05.
 
 ## Table of Contents
 
@@ -31,7 +31,7 @@ When installed into the go-wemix project root, Claude Code gains accurate unders
 - **Dev Guide** (`.claude/docs/CLAUDE_DEV_GUIDE.md`) — Build system, architecture, hardforks, Fee Delegation (`RecoverFeePayer` single entry point), Brioche halving, etcd cluster, `syncCheck` guard chain, mining-token / block-timestamp / EIP-7934 block-size invariants, and §15 StatusEx trust boundary / `wemixWorkKey` protection
 - **Governance Flow** (`.claude/docs/GOVERNANCE_FLOW.md`) — Registry/Gov/Staking/EnvStorage/BallotStorage/NCPExit deploy & upgrade flow, plus §6 GovImp security invariants (removed arbitrary-execute proposals, member-index integrity, CertiK W1G-01~04)
 - **Review Guide** (`.claude/docs/REVIEW_GUIDE.md`) — Question-type exploration guide, consensus flow, Wemix-specific review dimensions, response format
-- **Build Reference** (`.claude/docs/BUILD_SOURCE_FILES.md`) — Every file in the `gwemix` build (120 packages / 630 files) and the `logrot` build, **plus the 307 test files attached to those packages** and which ones cover Wemix-specific code
+- **Build Reference** (`.claude/docs/BUILD_SOURCE_FILES.md`) — Every file in the `gwemix` build (120 packages / 630 files) and the `logrot` build, **plus the 309 test files attached to those packages** and which ones cover Wemix-specific code
 
 ## Installation
 

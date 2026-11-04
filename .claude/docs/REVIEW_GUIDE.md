@@ -29,7 +29,7 @@ geth 원본에 없는 Wemix 전용 코드.
 | `eth/protocols/eth/wemix_handlers.go` | Wemix 전용 eth 프로토콜 메시지 핸들러 |
 | `params/wemix_config.go` | Wemix 부트노드 + `WemixGenesisFile` 전역 |
 | `params/config.go` *(부분)* | `Pangyo/Applepie/Brioche/Croissant` 하드포크, `BriocheConfig` |
-| `ethdb/rocksdb/*.go` | RocksDB 백엔드 (Linux 빌드만) |
+| `ethdb/rocksdb/*.go` | RocksDB 백엔드 (Linux 빌드만). cgo 수명 주의, 테스트는 CI 밖 (`CLAUDE_DEV_GUIDE.md` §2) |
 
 ## 질문 유형별 탐색 가이드
 
@@ -96,7 +96,7 @@ miner.Start()
 - `wemix/etcdutil.go` — etcd embedded 운영, 토큰 acquire/release, `etcdResetWork` (토큰 보유 확인 CAS)
 - `wemix/miner_limit.go` — `electNextMiner`, 마이너 상태 수집, `getCoinbaseEnodeCache`(노드 수 0이면 캐시하지 않음)
 - `wemix/spinlock.go` — 토큰 임계 영역 보호
-- `miner/worker.go` — `commitWork`(토큰 획득 게이트·반환), `etherbase()`, `timeIt`(타임스탬프 하한), `txFitsSize`(블록 크기 상한)
+- `miner/worker.go` — `commitWork`(토큰 획득 게이트·반환, PoA work의 `discard`), `etherbase()`, `timeIt`(타임스탬프 하한), `txFitsSize`(블록 크기 상한)
 - `core/block_validator.go` — `ValidateBody`가 8 MiB 초과 블록을 `ErrBlockOversized`로 거부
 - `wemix/miner/miner.go` — 표준 miner ↔ wemix 함수 변수 IoC (`NodeNameForPeerIDFunc` 등)
 - `consensus/clique/clique.go` — PoA 합의 본체 (Wemix는 위에 admin 레이어)
@@ -117,6 +117,7 @@ miner.Start()
 3. `timeIt`의 타임스탬프 하한은 `parent.Time()`이다
 4. 토큰을 잡은 뒤 블록 없이 빠져나가면 `defer`된 `AbandonMiningToken`이 토큰을 돌려준다. 회귀 테스트는 `miner/worker_wemix_mining_abandon_test.go`
 5. coinbase는 `w.etherbase()`로 잠금 아래에서 읽는다. `-race`로 `TestCommitWorkCoinbaseRace`를 돌릴 것
+6. PoA `commitWork`는 `defer work.discard()`로 프리페처를 멈춘다. work가 `w.current`에 남지 않아서 다른 곳에서 멈춰 주지 않는다 (`TestCommitWorkPrefetcherCleanup`)
 
 ### 유형 5: 거버넌스 컨트랙트 질문
 
@@ -171,6 +172,7 @@ wemix/governance-contract/contracts/ (Solidity 소스):
 
 - Wemix 핸들러: `eth/protocols/eth/wemix_handlers.go` — `handleStatusEx`가 **합의 입력의 신뢰 경계**. NodeName 거버넌스 재바인딩 + nil 가드가 여기에 모여 있음 (유형 4 참조)
 - 표준 eth 프로토콜: `eth/handler.go` → `eth/protocols/eth/handler.go`
+- tx 공지 수신: `eth/fetcher/tx_fetcher.go`. 피어별 상한 `maxTxAnnounces`는 1,500,000이고, 넘는 공지는 남은 자리(`maxTxAnnounces-used`)만큼 받는다
 - 피어 관리: `p2p/server.go` → `p2p/peer.go`
 - 노드 발견: `p2p/discover/`
 - RLPx 핸드셰이크: `p2p/rlpx/rlpx.go` (오라클 PoC 테스트 `rlpx_oracle_poc_test.go`)
@@ -205,6 +207,7 @@ wemix/governance-contract/contracts/ (Solidity 소스):
   - `GetBlockRewardAmount`, `GetBlockRewardDistributionMethod`
   - `GetBlockCreationTime`, `GetBlocksPer`, `GetMaxIdleBlockInterval`
   - `GetMaxPriorityFeePerGas`, `GetMaxBaseFee`, `GetGasLimitAndBaseFee`
+- RPC 가스 상한: `eth/ethconfig/config.go: defaultRPCGasCap`. 거버넌스 `blockGasLimit`을 올리는 변경이면 이 값도 같이 올렸는지 확인한다 (`CLAUDE_DEV_GUIDE.md` §18)
 
 ### 유형 11: 패키지 구조 / 아키텍처 질문
 
@@ -231,6 +234,7 @@ wemix/governance-contract/contracts/ (Solidity 소스):
 | 보안 | Fee Delegation 서명 검증(`RecoverFeePayer` 우회), 입력 검증, RPC 권한 | critical |
 | 성능 | EnvStorage 호출 캐싱 누락, 매 블록 N+1 | warning |
 | 동시성 | wemixAdmin 필드 race, spinlock 누락 | critical |
+| 고루틴·cgo 수명 | 멈추지 않는 프리페처 고루틴, `KeepAlive` 없는 C 호출, 무효 상태의 C 이터레이터 | critical |
 | 스타일 | 네이밍, 가독성, geth 코드 컨벤션 일관성 | suggestion |
 | 테스트 | rewards_test / etcd_test / sync_regression_test / gov_test 커버리지, mock 픽스처 훼손 | warning |
 

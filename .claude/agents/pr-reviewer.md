@@ -90,10 +90,13 @@ make test-short 2>&1 | tail -50
 - `wemix/` → `go test -short -count=1 ./wemix/...`
 - `core/types/` → `go test -short -count=1 ./core/types/...` (Fee Delegation 회귀)
 - `params/` → `go test -short -count=1 ./params/...` (하드포크 호환성)
-- `miner/` → `go test -short -count=1 ./miner/...` (토큰 획득 게이트·반환, coinbase 레이스, 타임스탬프 하한, 블록 크기 상한)
+- `miner/` → `go test -short -count=1 ./miner/...` (토큰 획득 게이트·반환, coinbase 레이스, 프리페처 누수, 타임스탬프 하한, 블록 크기 상한)
 - `core/block_validator.go` → `go test -short -count=1 -run TestValidateBody ./core/` (EIP-7934 블록 크기 상한)
 - `core/tx_pool.go` → `go test -short -count=1 -run TestFeeDelegation ./core/` (Fee Delegation 강등·eviction)
 - `eth/protocols/eth/` → `go test -short -count=1 ./eth/protocols/eth/...` (TransactionsEx 발신자, 메시지 크기 상한)
+- `eth/ethconfig/` → `go test -short -count=1 ./eth/ethconfig/...` (RPC 가스 상한 기본값)
+- `eth/fetcher/` → `go test -short -count=1 ./eth/fetcher/...` (피어별 tx 공지 상한)
+- `ethdb/rocksdb/` → `make test-short`와 CI가 돌리지 않는다. `rocksdb` 태그가 필요하므로 Linux RocksDB 빌드 환경에서 직접 실행하고, 실행하지 못했으면 보고서에 그렇게 적는다
 
 ### 2.4 실행 결과 요약
 
